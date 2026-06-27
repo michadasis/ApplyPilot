@@ -1,3 +1,5 @@
 .env
 config.json
 .venv
+/resume/*.pdf
+/resume/*.md

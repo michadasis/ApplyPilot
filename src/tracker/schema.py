@@ -18,9 +18,7 @@ logger = logging.getLogger(__name__)
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "jobs.db"
 
 
-# ---------------------------------------------------------------------------
 # DDL — Database schema (run once on startup via init_db())
-# ---------------------------------------------------------------------------
 
 SCHEMA_SQL = """
 -- ============================================================
@@ -134,9 +132,7 @@ def get_db(db_path: Path = DB_PATH) -> Generator[sqlite3.Connection, None, None]
         conn.close()
 
 
-# ---------------------------------------------------------------------------
 # Convenience helpers used by multiple modules
-# ---------------------------------------------------------------------------
 
 def upsert_job(
     title: str,

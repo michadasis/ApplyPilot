@@ -2,17 +2,17 @@
 # Install with: pip install -r requirements.txt
 # Then run: playwright install chromium
 
-# ── Core automation ────────────────────────────────────────────────────────
+# Core automation
 playwright==1.44.0              # Browser automation (Chromium)
 
-# ── AI / LLM ──────────────────────────────────────────────────────────────
+# AI / LLM
 anthropic==0.28.0               # Anthropic Claude API client
 
-# ── Resume parsing ────────────────────────────────────────────────────────
+# Resume parsing
 pdfplumber==0.11.0              # PDF text extraction (handles multi-column)
 
-# ── Configuration ─────────────────────────────────────────────────────────
+# Configuration
 python-dotenv==1.0.1            # .env file loader
 
-# ── Utilities ─────────────────────────────────────────────────────────────
+# Utilities
 # (sqlite3 is part of Python stdlib — no install needed)

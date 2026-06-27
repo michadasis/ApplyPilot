@@ -29,9 +29,7 @@ NAVIGATION_TIMEOUT = 30_000
 SCROLL_PAUSE_MS    = (800, 1800)   # Random range for scroll pauses
 
 
-# ---------------------------------------------------------------------------
 # Data model
-# ---------------------------------------------------------------------------
 
 @dataclass
 class JobListing:
@@ -43,9 +41,7 @@ class JobListing:
     source:      str
 
 
-# ---------------------------------------------------------------------------
 # LinkedIn Scraper
-# ---------------------------------------------------------------------------
 
 class LinkedInScraper:
     """
@@ -229,9 +225,7 @@ class LinkedInScraper:
         )
 
 
-# ---------------------------------------------------------------------------
 # JSON Feed Ingestor (generic fallback / custom feeds)
-# ---------------------------------------------------------------------------
 
 class JSONFeedIngestor:
     """
@@ -279,9 +273,7 @@ class JSONFeedIngestor:
             )
 
 
-# ---------------------------------------------------------------------------
 # Orchestration helper — save scraped jobs to DB
-# ---------------------------------------------------------------------------
 
 async def ingest_and_store(
     scraper: LinkedInScraper | JSONFeedIngestor,

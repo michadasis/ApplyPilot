@@ -1,4 +1,4 @@
-# 🤖 Auto-Apply Job Bot
+# ApplyPilot
 
 A modular, local-first job application automation system powered by Playwright and Claude AI. Scrapes job listings, scores them against your resume with an LLM, and fills out ATS application forms automatically — with a human-in-the-loop safeguard before any submission.
 

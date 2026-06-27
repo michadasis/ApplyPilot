@@ -1,6 +1,4 @@
 """
-main.py — Auto-Apply Job Bot Entry Point
-
 Orchestrates the full pipeline:
   Phase 1: SCRAPE  — Discover new jobs from LinkedIn / JSON feed
   Phase 2: SCORE   — LLM match scoring against resume
@@ -54,9 +52,7 @@ from src.tracker.tracker import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Phase runners
-# ---------------------------------------------------------------------------
 
 async def run_scrape_phase(config, context, feed_path: Path | None = None) -> None:
     """Phase 1: Discover and store new job listings."""
@@ -194,14 +190,12 @@ async def run_apply_phase(
         await asyncio.sleep(3)
 
 
-# ---------------------------------------------------------------------------
 # Main entry point
-# ---------------------------------------------------------------------------
 
 async def main(args: argparse.Namespace) -> None:
     """Top-level async orchestrator."""
 
-    # ── Bootstrap ──────────────────────────────────────────────────────────
+    # Bootstrap
     setup_logging(level="DEBUG" if args.verbose else "INFO")
     write_example_config()   # Write example if missing (first-run UX)
 
@@ -219,7 +213,7 @@ async def main(args: argparse.Namespace) -> None:
     phase = args.phase.lower()
     feed_path = Path(args.feed) if args.feed else None
 
-    # ── Run phases ─────────────────────────────────────────────────────────
+    # Run phases
     async with async_playwright() as playwright:
         _, context = await build_browser_context(playwright, config)
 
@@ -240,13 +234,11 @@ async def main(args: argparse.Namespace) -> None:
         finally:
             await context.close()
 
-    # ── Summary ────────────────────────────────────────────────────────────
+    # Summary
     print_run_summary()
 
 
-# ---------------------------------------------------------------------------
 # CLI argument parser
-# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(

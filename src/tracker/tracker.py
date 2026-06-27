@@ -18,9 +18,7 @@ from typing import Any
 
 from src.tracker.schema import get_db
 
-# ---------------------------------------------------------------------------
 # Logging configuration
-# ---------------------------------------------------------------------------
 
 LOGS_DIR = Path(__file__).parent.parent.parent / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,7 +40,7 @@ def setup_logging(level: str = "INFO") -> None:
     if root.handlers:
         return
 
-    # ── Console handler ────────────────────────────────────────────────────
+    # Console handler
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(log_level)
     console.setFormatter(_ColorFormatter(
@@ -51,7 +49,7 @@ def setup_logging(level: str = "INFO") -> None:
     ))
     root.addHandler(console)
 
-    # ── Rotating file handler ──────────────────────────────────────────────
+    # Rotating file handler
     today = datetime.now().strftime("%Y-%m-%d")
     log_file = LOGS_DIR / f"auto_apply_{today}.log"
     file_handler = logging.handlers.RotatingFileHandler(
@@ -89,9 +87,7 @@ class _ColorFormatter(logging.Formatter):
         return super().format(record)
 
 
-# ---------------------------------------------------------------------------
 # ApplicationTracker — per-run state manager
-# ---------------------------------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
@@ -215,9 +211,7 @@ class ApplicationTracker:
         )
 
 
-# ---------------------------------------------------------------------------
 # Query helpers — used by the main pipeline
-# ---------------------------------------------------------------------------
 
 def fetch_jobs_for_processing(
     statuses: list[str] | None = None,
@@ -270,9 +264,7 @@ def fetch_unscored_jobs(limit: int = 100) -> list[dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-# ---------------------------------------------------------------------------
 # Run summary reporter
-# ---------------------------------------------------------------------------
 
 def print_run_summary() -> None:
     """

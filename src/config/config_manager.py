@@ -23,9 +23,7 @@ ENV_PATH     = PROJECT_ROOT / ".env"
 RESUME_DIR   = PROJECT_ROOT / "resume"
 
 
-# ---------------------------------------------------------------------------
 # Dataclasses — typed config models
-# ---------------------------------------------------------------------------
 
 @dataclass
 class JobSearchConfig:
@@ -68,9 +66,7 @@ class AppConfig:
     resume_md_path:    Path = RESUME_DIR / "resume.md"   # optional plaintext version
 
 
-# ---------------------------------------------------------------------------
 # Loader
-# ---------------------------------------------------------------------------
 
 def load_config() -> AppConfig:
     """
@@ -144,9 +140,7 @@ def load_config() -> AppConfig:
     return cfg
 
 
-# ---------------------------------------------------------------------------
 # Example config.json template (written if missing, for first-run UX)
-# ---------------------------------------------------------------------------
 
 EXAMPLE_CONFIG: dict[str, Any] = {
     "target_titles": ["Software Engineer", "Backend Engineer", "Python Developer"],

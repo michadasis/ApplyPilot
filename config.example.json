@@ -1,0 +1,36 @@
+{
+  "target_titles": [
+    "Software Engineer",
+    "Backend Engineer",
+    "Python Developer",
+    "Full Stack Engineer"
+  ],
+  "target_locations": [
+    "Remote",
+    "New York, NY",
+    "San Francisco, CA"
+  ],
+  "exclude_keywords": [
+    "senior",
+    "staff",
+    "principal",
+    "director",
+    "manager",
+    "lead",
+    "10+ years",
+    "8+ years"
+  ],
+  "min_match_score": 0.70,
+  "bot_behavior": {
+    "require_manual_review": true,
+    "headless": false,
+    "slow_mo_ms": 80,
+    "max_applications_per_run": 5,
+    "screenshot_on_failure": true,
+    "retry_failed_attempts": 1
+  },
+  "ats": {
+    "workday_company_ids": [],
+    "preferred_ats": ["greenhouse", "lever", "workday"]
+  }
+}

@@ -60,8 +60,6 @@ class AppConfig:
 
     # Secrets — populated from .env, never from config.json
     anthropic_api_key: str = ""
-    linkedin_email:    str = ""
-    linkedin_password: str = ""
     resume_pdf_path:   Path = RESUME_DIR / "resume.pdf"
     resume_md_path:    Path = RESUME_DIR / "resume.md"   # optional plaintext version
 
@@ -127,8 +125,6 @@ def load_config() -> AppConfig:
         behavior = behavior_cfg,
         ats      = ats_cfg,
         anthropic_api_key = api_key,
-        linkedin_email    = os.getenv("LINKEDIN_EMAIL", ""),
-        linkedin_password = os.getenv("LINKEDIN_PASSWORD", ""),
         resume_pdf_path   = Path(os.getenv("RESUME_PDF_PATH", str(RESUME_DIR / "resume.pdf"))),
         resume_md_path    = Path(os.getenv("RESUME_MD_PATH",  str(RESUME_DIR / "resume.md"))),
     )

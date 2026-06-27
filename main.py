@@ -40,7 +40,7 @@ from src.config.config_manager import load_config, write_example_config
 from src.filler.form_filler import FormFillerEngine, build_browser_context
 from src.matcher.llm_orchestrator import build_llm_client
 from src.matcher.resume_matcher import ResumeMatcher
-from src.scraper.scraper import LinkedInScraper, JSONFeedIngestor, ingest_and_store
+from src.scraper.scraper import RemoteOKScraper, JSONFeedIngestor, ingest_and_store
 from src.tracker.schema import init_db, update_job_status
 from src.tracker.tracker import (
     ApplicationTracker,
@@ -54,8 +54,8 @@ logger = logging.getLogger(__name__)
 
 # Phase runners
 
-async def run_scrape_phase(config, context, feed_path: Path | None = None) -> None:
-    """Phase 1: Discover and store new job listings."""
+async def run_scrape_phase(config, feed_path: Path | None = None) -> None:
+    """Phase 1: Discover and store new job listings via RemoteOK API or JSON feed."""
     logger.info("═" * 50)
     logger.info("PHASE 1: SCRAPING")
     logger.info("═" * 50)
@@ -63,7 +63,7 @@ async def run_scrape_phase(config, context, feed_path: Path | None = None) -> No
     if feed_path:
         scraper = JSONFeedIngestor(feed_path)
     else:
-        scraper = LinkedInScraper(config, context)
+        scraper = RemoteOKScraper(config)
 
     await ingest_and_store(
         scraper,
@@ -219,7 +219,7 @@ async def main(args: argparse.Namespace) -> None:
 
         try:
             if phase in ("all", "scrape"):
-                await run_scrape_phase(config, context, feed_path=feed_path)
+                await run_scrape_phase(config, feed_path=feed_path)
 
             if phase in ("all", "score"):
                 run_score_phase(config)   # sync — no browser needed

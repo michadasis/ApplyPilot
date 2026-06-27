@@ -443,7 +443,6 @@ async def _fill_field(
             try:
                 await page.select_option(selector, label=value)
             except Exception:
-                # Partial match: find option whose text contains `value`
                 matched = next(
                     (opt for opt in form_field.options
                      if value.lower() in opt.lower()),

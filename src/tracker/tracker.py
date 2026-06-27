@@ -171,7 +171,7 @@ class ApplicationTracker:
 
         Args:
             answers: JSON-encoded string of {field_label: generated_answer}.
-                     Pass the FillResult.answers_json string directly.
+                     Pass FillResult.answers_json directly.
         """
         if self.app_id is None:
             logger.warning("ApplicationTracker.finish() called before start()")

@@ -107,7 +107,7 @@ def init_db(db_path: Path = DB_PATH) -> None:
             conn.execute("ALTER TABLE applications ADD COLUMN steps_json TEXT")
             conn.commit()
         except sqlite3.OperationalError:
-            pass  # Column already exists — nothing to do
+            pass  # Column already exists
     logger.info(f"Database initialized at {db_path}")
 
 

@@ -6,7 +6,7 @@
 playwright==1.44.0              # Browser automation (Chromium)
 
 # AI / LLM
-anthropic==0.28.0               # Anthropic Claude API client
+anthropic>=0.40.0              # Anthropic Claude API client
 
 # Resume parsing
 pdfplumber==0.11.0              # PDF text extraction (handles multi-column)
@@ -14,5 +14,5 @@ pdfplumber==0.11.0              # PDF text extraction (handles multi-column)
 # Configuration
 python-dotenv==1.0.1            # .env file loader
 
-# Utilities
-# (sqlite3 is part of Python stdlib — no install needed)
+# HTTP (used by the RemoteOK scraper; also a transitive dep of anthropic)
+httpx>=0.27.0

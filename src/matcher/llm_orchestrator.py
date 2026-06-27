@@ -205,14 +205,18 @@ def score_job_match(
 
     Returns the parsed JSON dict (see MATCH_SYSTEM_PROMPT schema).
     """
+    # Truncate inputs to stay within context limits
+    resume_snippet = resume_text[:6000]
+    jd_snippet = job_description[:4000]
+
     user_message = f"""
 CANDIDATE RESUME:
-{resume_text[:6000]}  # Truncate to stay within context limits
+{resume_snippet}
 
 JOB TITLE: {job_title}
 
 JOB DESCRIPTION:
-{job_description[:4000]}
+{jd_snippet}
 
 Evaluate the match and return the JSON object.
 """.strip()

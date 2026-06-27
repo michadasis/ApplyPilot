@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS applications (
                                 -- in_progress | submitted | failed | skipped_review
     cover_letter    TEXT,                         -- generated cover letter text
     answers_json    TEXT,                         -- JSON blob: {field_label: generated_answer}
+    steps_json      TEXT,                         -- JSON array of discrete step events
     error_message   TEXT,                         -- populated on failure
     screenshot_path TEXT,                         -- path to failure screenshot
     submitted_at    TEXT,                         -- timestamp of final submission
@@ -101,7 +102,12 @@ def init_db(db_path: Path = DB_PATH) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         conn.executescript(SCHEMA_SQL)
-        conn.commit()
+        # Safe migration: add steps_json column if an older DB is missing it
+        try:
+            conn.execute("ALTER TABLE applications ADD COLUMN steps_json TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists — nothing to do
     logger.info(f"Database initialized at {db_path}")
 
 

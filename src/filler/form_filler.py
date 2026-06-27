@@ -430,7 +430,16 @@ async def _fill_field(
 
         # Select/dropdown
         if form_field.field_type == "select":
-            # Try exact match first, then partial
+            # Workday uses div-based custom dropdowns, not native <select>
+            if "workday" in selector:
+                await el.click()
+                await page.wait_for_timeout(500)
+                option_el = page.get_by_role("option", name=re.compile(value, re.IGNORECASE))
+                await option_el.click()
+                logger.debug(f"🔽 Selected Workday option '{value}' in: {selector}")
+                return True
+
+            # Standard <select> — try exact match first, then partial
             try:
                 await page.select_option(selector, label=value)
             except Exception:
@@ -446,14 +455,6 @@ async def _fill_field(
                     logger.warning(f"No matching option for '{value}' in {selector}")
                     return False
             logger.debug(f"🔽 Selected '{value}' in: {selector}")
-            return True
-
-        # Workday custom dropdown (div-based)
-        if form_field.field_type == "select" and "workday" in selector:
-            await el.click()
-            await page.wait_for_timeout(500)
-            option_el = page.get_by_role("option", name=re.compile(value, re.IGNORECASE))
-            await option_el.click()
             return True
 
         # Radio button group
@@ -930,7 +931,7 @@ class FormFillerEngine:
         """
         Pause execution and prompt the user to review the filled form before submitting.
 
-        This runs in an asyncio context, so we use asyncio.get_event_loop().run_in_executor
+        This runs in an asyncio context, so we use asyncio.get_running_loop().run_in_executor
         to run the blocking input() call without freezing the event loop.
 
         Returns True if user confirms submission, False if they skip.
@@ -943,7 +944,7 @@ class FormFillerEngine:
         print("  Type  skip  + ENTER  to skip this application.")
         print("═" * 60)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         user_input = await loop.run_in_executor(None, input, "  → Your choice: ")
 
         if user_input.strip().lower() == "skip":

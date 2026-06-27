@@ -160,7 +160,7 @@ class ApplicationTracker:
         success: bool,
         submitted: bool = False,
         cover_letter: str = "",
-        answers: dict[str, str] | None = None,
+        answers: str = "",
         error_message: str = "",
         screenshot_path: str = "",
     ) -> None:
@@ -168,6 +168,10 @@ class ApplicationTracker:
         Finalize the application record in SQLite.
 
         Computes elapsed time, sets final status, and persists step log.
+
+        Args:
+            answers: JSON-encoded string of {field_label: generated_answer}.
+                     Pass the FillResult.answers_json string directly.
         """
         if self.app_id is None:
             logger.warning("ApplicationTracker.finish() called before start()")
@@ -188,6 +192,7 @@ class ApplicationTracker:
                     status          = ?,
                     cover_letter    = ?,
                     answers_json    = ?,
+                    steps_json      = ?,
                     error_message   = ?,
                     screenshot_path = ?,
                     submitted_at    = ?
@@ -196,7 +201,8 @@ class ApplicationTracker:
                 (
                     status,
                     cover_letter,
-                    json.dumps(answers or {}),
+                    answers or "{}",
+                    steps_json,
                     error_message,
                     screenshot_path,
                     datetime.now().isoformat() if submitted else None,

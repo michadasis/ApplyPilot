@@ -124,9 +124,7 @@ class ResumeMatcher:
         return _load_match_metadata(job_id)
 
 
-# ---------------------------------------------------------------------------
 # Match metadata persistence helpers
-# ---------------------------------------------------------------------------
 
 def _store_match_metadata(job_id: int, match_result: dict[str, Any]) -> None:
     """

@@ -52,9 +52,7 @@ from src.tracker.schema import get_db, update_job_status
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 
 SCREENSHOTS_DIR = Path(__file__).parent.parent.parent / "screenshots"
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,9 +96,7 @@ SUBMIT_SELECTORS: dict[str, list[str]] = {
     ],
 }
 
-# ---------------------------------------------------------------------------
 # Data models
-# ---------------------------------------------------------------------------
 
 @dataclass
 class FormField:
@@ -128,9 +124,7 @@ class FillResult:
     answers_json: str        = ""      # JSON string of {label: answer}
 
 
-# ---------------------------------------------------------------------------
 # ATS Detection
-# ---------------------------------------------------------------------------
 
 def detect_ats_type(url: str, page_content: str = "") -> str:
     """
@@ -160,9 +154,7 @@ def detect_ats_type(url: str, page_content: str = "") -> str:
     return "generic"
 
 
-# ---------------------------------------------------------------------------
 # Field Extraction — DOM scrapers per ATS type
-# ---------------------------------------------------------------------------
 
 async def _extract_fields_greenhouse(page: Page) -> list[FormField]:
     """
@@ -404,9 +396,7 @@ FIELD_EXTRACTORS = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Field Filling — type-aware actions
-# ---------------------------------------------------------------------------
 
 async def _fill_field(
     page: Page,
@@ -429,7 +419,7 @@ async def _fill_field(
             logger.warning(f"Selector not found: {selector}")
             return False
 
-        # ── File upload ────────────────────────────────────────────────────
+        # File upload
         if form_field.field_type == "file" or value == "__UPLOAD_RESUME__":
             if not resume_path.exists():
                 logger.error(f"Resume file not found: {resume_path}")
@@ -438,7 +428,7 @@ async def _fill_field(
             logger.debug(f"📎 Uploaded resume to: {selector}")
             return True
 
-        # ── Select/dropdown ────────────────────────────────────────────────
+        # Select/dropdown
         if form_field.field_type == "select":
             # Try exact match first, then partial
             try:
@@ -458,7 +448,7 @@ async def _fill_field(
             logger.debug(f"🔽 Selected '{value}' in: {selector}")
             return True
 
-        # ── Workday custom dropdown (div-based) ────────────────────────────
+        # Workday custom dropdown (div-based)
         if form_field.field_type == "select" and "workday" in selector:
             await el.click()
             await page.wait_for_timeout(500)
@@ -466,7 +456,7 @@ async def _fill_field(
             await option_el.click()
             return True
 
-        # ── Radio button group ─────────────────────────────────────────────
+        # Radio button group
         if form_field.field_type == "radio":
             # Click the radio label containing the value text
             radio_label = page.locator(
@@ -480,7 +470,7 @@ async def _fill_field(
             await page.check(f"input[type='radio'][value='{value}']")
             return True
 
-        # ── Checkbox ───────────────────────────────────────────────────────
+        # Checkbox
         if form_field.field_type == "checkbox":
             should_check = value.lower() in ("true", "yes", "1", "check")
             if should_check:
@@ -490,7 +480,7 @@ async def _fill_field(
             logger.debug(f"☑️ Checkbox '{selector}' set to {should_check}")
             return True
 
-        # ── Text / Email / Tel / Textarea ──────────────────────────────────
+        # Text / Email / Tel / Textarea
         # Clear existing content first (important for pre-filled fields)
         await el.triple_click()        # select all
         await el.fill(value)           # Playwright fill is more reliable than type()
@@ -511,9 +501,7 @@ async def _fill_field(
         return False
 
 
-# ---------------------------------------------------------------------------
 # Workday multi-step pagination handler
-# ---------------------------------------------------------------------------
 
 async def _handle_workday_pagination(page: Page, current_step: int) -> bool:
     """
@@ -544,9 +532,7 @@ async def _handle_workday_pagination(page: Page, current_step: int) -> bool:
     return False   # No Next button — we're on the last step
 
 
-# ---------------------------------------------------------------------------
 # Core Form Filler
-# ---------------------------------------------------------------------------
 
 class FormFillerEngine:
     """
@@ -622,18 +608,18 @@ class FormFillerEngine:
         result = FillResult(job_id=job_id, ats_type="unknown", success=False)
 
         try:
-            # ── Step 1: Navigate ──────────────────────────────────────────
+            # Step 1: Navigate
             logger.info(f"[job_id={job_id}] Navigating to {apply_url}")
             await page.goto(apply_url, wait_until="networkidle",
                             timeout=NAVIGATION_TIMEOUT)
             page_content = await page.content()
 
-            # ── Step 2: Detect ATS ────────────────────────────────────────
+            # Step 2: Detect ATS
             ats_type = detect_ats_type(apply_url, page_content)
             result.ats_type = ats_type
             logger.info(f"[job_id={job_id}] ATS type: {ats_type}")
 
-            # ── Step 3: Generate cover letter (async, before field extraction) ──
+            # Step 3: Generate cover letter (async, before field extraction)
             cover_letter = generate_cover_letter(
                 client=self.llm_client,
                 resume_text=self._resume["raw_text"],
@@ -645,7 +631,7 @@ class FormFillerEngine:
             )
             result.cover_letter_text = cover_letter
 
-            # ── Step 4 + 5: Fill form (handles multi-step internally) ─────
+            # Step 4 + 5: Fill form (handles multi-step internally)
             answers: dict[str, str] = {}
 
             if ats_type == "workday":
@@ -660,7 +646,7 @@ class FormFillerEngine:
 
             result.answers_json = json.dumps(answers)
 
-            # ── Step 6: Human-in-the-loop gate ────────────────────────────
+            # Step 6: Human-in-the-loop gate
             if self.config.behavior.require_manual_review:
                 submitted = await self._human_review_gate(page, job_id)
                 result.submitted       = submitted
@@ -686,7 +672,7 @@ class FormFillerEngine:
 
         return result
 
-    # ── Single-page filler (Greenhouse, Lever, Generic) ───────────────────
+    # Single-page filler (Greenhouse, Lever, Generic)
 
     async def _fill_single_page(
         self,
@@ -759,7 +745,7 @@ class FormFillerEngine:
 
         return answers
 
-    # ── Workday multi-step filler ─────────────────────────────────────────
+    # Workday multi-step filler
 
     async def _fill_workday(
         self,
@@ -867,7 +853,7 @@ class FormFillerEngine:
         )
         return review_heading is not None
 
-    # ── Value marker resolution ────────────────────────────────────────────
+    # Value marker resolution
 
     async def _resolve_value_marker(
         self,
@@ -908,7 +894,7 @@ class FormFillerEngine:
         # Pass-through for normal values and __UPLOAD_RESUME__
         return value, False
 
-    # ── Submit button ─────────────────────────────────────────────────────
+    # Submit button
 
     async def _click_submit(self, page: Page, ats_type: str) -> None:
         """
@@ -938,7 +924,7 @@ class FormFillerEngine:
             "The form may require manual completion."
         )
 
-    # ── Human-in-the-loop gate ────────────────────────────────────────────
+    # Human-in-the-loop gate
 
     async def _human_review_gate(self, page: Page, job_id: int) -> bool:
         """
@@ -969,7 +955,7 @@ class FormFillerEngine:
         await self._click_submit(page, "generic")
         return True
 
-    # ── Screenshot helper ─────────────────────────────────────────────────
+    # Screenshot helper
 
     async def _capture_screenshot(self, page: Page, job_id: int) -> str:
         """Capture a full-page screenshot and save to the screenshots directory."""
@@ -984,9 +970,7 @@ class FormFillerEngine:
             return ""
 
 
-# ---------------------------------------------------------------------------
 # Browser Context Factory — persistent context for session reuse
-# ---------------------------------------------------------------------------
 
 async def build_browser_context(
     playwright: Playwright,

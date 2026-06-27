@@ -27,17 +27,13 @@ from src.tracker.schema import log_llm_call
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Model config — change here to switch models globally
-# ---------------------------------------------------------------------------
 DEFAULT_MODEL    = "claude-3-5-sonnet-20241022"
 MAX_TOKENS       = 2048
 RESUME_CACHE: dict[str, Any] = {}   # in-process cache so we only parse once
 
 
-# ---------------------------------------------------------------------------
 # Internal gateway — all LLM calls funnel through here
-# ---------------------------------------------------------------------------
 
 def _call_llm(
     *,
@@ -130,9 +126,7 @@ def _strip_json_fences(text: str) -> str:
     return text.strip()
 
 
-# ---------------------------------------------------------------------------
 # Module 1 — Resume Parser
-# ---------------------------------------------------------------------------
 
 def parse_resume(resume_path: Path) -> dict[str, Any]:
     """
@@ -173,9 +167,7 @@ def parse_resume(resume_path: Path) -> dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------------------------------
 # Module 2 — Job/Resume Match Scorer
-# ---------------------------------------------------------------------------
 
 MATCH_SYSTEM_PROMPT = """
 You are a technical recruiter and resume matcher. Your task is to evaluate how well
@@ -241,9 +233,7 @@ Evaluate the match and return the JSON object.
     return result
 
 
-# ---------------------------------------------------------------------------
 # Module 3 — Form Field Semantic Extractor
-# ---------------------------------------------------------------------------
 
 FIELD_EXTRACT_SYSTEM_PROMPT = """
 You are an expert web automation engineer specializing in job application forms.
@@ -310,9 +300,7 @@ Map each field to the correct value. Return ONLY the JSON object.
     return mappings
 
 
-# ---------------------------------------------------------------------------
 # Module 4 — Short Answer Generator (custom questions)
-# ---------------------------------------------------------------------------
 
 SHORT_ANSWER_SYSTEM_PROMPT = """
 You are writing job application answers on behalf of a candidate.
@@ -370,9 +358,7 @@ Write a 3-sentence answer to this question.
     return answer
 
 
-# ---------------------------------------------------------------------------
 # Module 5 — Cover Letter Generator
-# ---------------------------------------------------------------------------
 
 COVER_LETTER_SYSTEM_PROMPT = """
 You are writing a professional cover letter for a job application.
@@ -432,9 +418,7 @@ Write the 3-paragraph cover letter body.
     return letter
 
 
-# ---------------------------------------------------------------------------
 # Factory — single client instance for callers
-# ---------------------------------------------------------------------------
 
 def build_llm_client(api_key: str) -> anthropic.Anthropic:
     """Create and return a configured Anthropic client."""

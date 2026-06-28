@@ -6,7 +6,8 @@
 playwright==1.44.0              # Browser automation (Chromium)
 
 # AI / LLM
-anthropic>=0.40.0              # Anthropic Claude API client
+google-generativeai>=0.8.0     # Google Gemini API client (free tier available)
+                                # Get a key at: https://aistudio.google.com/app/apikey
 
 # Resume parsing
 pdfplumber==0.11.0              # PDF text extraction (handles multi-column)

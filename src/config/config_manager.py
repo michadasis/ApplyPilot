@@ -59,7 +59,7 @@ class AppConfig:
     ats:      ATSConfig         = field(default_factory=ATSConfig)
 
     # Secrets — populated from .env, never from config.json
-    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
     resume_pdf_path:   Path = RESUME_DIR / "resume.pdf"
     resume_md_path:    Path = RESUME_DIR / "resume.md"   # optional plaintext version
 
@@ -113,10 +113,10 @@ def load_config() -> AppConfig:
     )
 
     # 3. Secrets from environment (never hardcoded)
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         raise ValueError(
-            "ANTHROPIC_API_KEY is not set. "
+            "GEMINI_API_KEY is not set. "
             "Add it to your .env file or export it as an environment variable."
         )
 
@@ -124,7 +124,7 @@ def load_config() -> AppConfig:
         search   = search_cfg,
         behavior = behavior_cfg,
         ats      = ats_cfg,
-        anthropic_api_key = api_key,
+        gemini_api_key = api_key,
         resume_pdf_path   = Path(os.getenv("RESUME_PDF_PATH", str(RESUME_DIR / "resume.pdf"))),
         resume_md_path    = Path(os.getenv("RESUME_MD_PATH",  str(RESUME_DIR / "resume.md"))),
     )

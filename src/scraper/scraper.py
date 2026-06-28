@@ -160,7 +160,7 @@ class RemoteOKScraper:
                     seen_ids.add(job_id)
 
                     title = raw.get("position", "").strip()
-                    if not title or self._is_excluded(title):
+                    if not title or self._is_excluded(title) or not self._is_relevant(title):
                         continue
 
                     apply_url = (raw.get("apply_url") or raw.get("url") or "").strip()
@@ -285,4 +285,32 @@ def _is_excluded(title: str, exclude_keywords: list[str]) -> bool:
 # Patch the method onto both classes so they don't need to duplicate the logic
 RemoteOKScraper._is_excluded = lambda self, t: _is_excluded(
     t, self.config.search.exclude_keywords
+)
+
+# Keywords derived from each configured title — any one match keeps the job
+_RELEVANCE_KEYWORDS = [
+    "software", "developer", "engineer", "backend", "back-end",
+    "frontend", "front-end", "fullstack", "full-stack", "full stack",
+    "python", "javascript", "typescript", "node", "react",
+    "web dev", "devops", "sre", "platform", "api", "cloud",
+]
+
+def _is_relevant(title: str, search_titles: list[str]) -> bool:
+    """
+    Return True if the job title plausibly matches what we're looking for.
+
+    Checks against both the user's configured titles and a broad set of
+    tech-role keywords so we don't miss slightly differently-worded roles.
+    """
+    title_lower = title.lower()
+    # Match any configured target title word
+    for target in search_titles:
+        for word in target.lower().split():
+            if len(word) > 3 and word in title_lower:
+                return True
+    # Match broad tech-role vocabulary
+    return any(kw in title_lower for kw in _RELEVANCE_KEYWORDS)
+
+RemoteOKScraper._is_relevant = lambda self, t: _is_relevant(
+    t, self.config.search.titles
 )

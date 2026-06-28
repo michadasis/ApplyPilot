@@ -11,7 +11,8 @@ The AI brain of the bot. Responsible for:
 All LLM calls go through a single _call_llm() gateway for unified
 error handling, token counting, and cost logging.
 
-Stack: Anthropic Claude (claude-3-5-sonnet) via the official SDK.
+Stack: Google Gemini (gemini-2.0-flash) via the official SDK.
+Free tier: https://ai.google.dev/pricing
 """
 
 import json
@@ -20,24 +21,35 @@ import re
 from pathlib import Path
 from typing import Any
 
-import anthropic
-import pdfplumber  # pip install pdfplumber
+import google.generativeai as genai
+import pdfplumber
 
 from src.tracker.schema import log_llm_call
 
 logger = logging.getLogger(__name__)
 
-# Model config — change here to switch models globally
-DEFAULT_MODEL    = "claude-3-5-sonnet-20241022"
-MAX_TOKENS       = 2048
+DEFAULT_MODEL = "gemini-2.0-flash"
+MAX_TOKENS    = 2048
 RESUME_CACHE: dict[str, Any] = {}   # in-process cache so we only parse once
+
+
+# Client wrapper
+
+class GeminiClient:
+    """
+    Thin wrapper around the Gemini SDK.
+    Holds the configured API key so callers don't manage global state.
+    """
+    def __init__(self, api_key: str) -> None:
+        genai.configure(api_key=api_key)
+        self.api_key = api_key
 
 
 # Internal gateway — all LLM calls funnel through here
 
 def _call_llm(
     *,
-    client: anthropic.Anthropic,
+    client: GeminiClient,
     system_prompt: str,
     user_message: str,
     purpose: str,
@@ -47,44 +59,46 @@ def _call_llm(
     expect_json: bool = False,
 ) -> str:
     """
-    Thin wrapper around the Anthropic Messages API.
+    Thin wrapper around the Gemini GenerativeModel API.
 
     Args:
-        client        : Authenticated anthropic.Anthropic instance.
+        client        : Authenticated GeminiClient instance.
         system_prompt : System-level instruction for the model.
         user_message  : The actual user turn content.
         purpose       : Label for the llm_calls audit log row.
         job_id        : Optional FK for cost attribution.
-        model         : Model ID string.
+        model         : Gemini model ID string.
         max_tokens    : Max completion tokens.
-        expect_json   : If True, validate that the response is parseable JSON
-                        and retry once if not.
+        expect_json   : If True, validate response is parseable JSON
+                        and retry once on failure.
 
     Returns:
         The model's text response as a string.
 
     Raises:
-        anthropic.APIError on unrecoverable API failures.
         ValueError if expect_json=True and JSON is malformed after retry.
     """
-    messages = [{"role": "user", "content": user_message}]
-
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=messages,
+    llm = genai.GenerativeModel(
+        model_name=model,
+        system_instruction=system_prompt,
+    )
+    generation_config = genai.types.GenerationConfig(
+        max_output_tokens=max_tokens,
     )
 
-    text = response.content[0].text.strip()
+    response = llm.generate_content(
+        user_message,
+        generation_config=generation_config,
+    )
+    text = response.text.strip()
 
-    # Audit log — non-blocking (we don't fail the app over a logging error)
+    # Audit log — non-blocking
     try:
         log_llm_call(
             purpose=purpose,
             model=model,
-            prompt_tokens=response.usage.input_tokens,
-            completion_tokens=response.usage.output_tokens,
+            prompt_tokens=response.usage_metadata.prompt_token_count,
+            completion_tokens=response.usage_metadata.candidates_token_count,
             job_id=job_id,
         )
     except Exception as log_err:
@@ -94,26 +108,19 @@ def _call_llm(
     if expect_json:
         text = _strip_json_fences(text)
         try:
-            json.loads(text)   # validate; caller does the actual parse
-        except json.JSONDecodeError:
-            # One retry with an explicit correction prompt
-            logger.warning(f"[{purpose}] LLM returned invalid JSON — retrying with correction")
-            correction_messages = [
-                {"role": "user",    "content": user_message},
-                {"role": "assistant", "content": text},
-                {"role": "user",    "content":
-                    "Your response was not valid JSON. "
-                    "Return ONLY the JSON object, no markdown fences, no commentary."},
-            ]
-            retry_resp = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=system_prompt,
-                messages=correction_messages,
-            )
-            text = _strip_json_fences(retry_resp.content[0].text.strip())
-            # If still broken, raise — caller must handle
             json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning(f"[{purpose}] LLM returned invalid JSON — retrying")
+            chat = llm.start_chat(history=[
+                {"role": "user",  "parts": [user_message]},
+                {"role": "model", "parts": [text]},
+            ])
+            retry_resp = chat.send_message(
+                "Your response was not valid JSON. "
+                "Return ONLY the JSON object, no markdown fences, no commentary."
+            )
+            text = _strip_json_fences(retry_resp.text.strip())
+            json.loads(text)   # raise if still broken
 
     logger.debug(f"[{purpose}] LLM response ({len(text)} chars)")
     return text
@@ -122,7 +129,7 @@ def _call_llm(
 def _strip_json_fences(text: str) -> str:
     """Remove ```json ... ``` or ``` ... ``` fences that models sometimes emit."""
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\s*```$",          "", text, flags=re.MULTILINE)
     return text.strip()
 
 
@@ -137,8 +144,8 @@ def parse_resume(resume_path: Path) -> dict[str, Any]:
 
     Returns:
         {
-          "raw_text": str,           # Full concatenated text
-          "pages": [str, ...],       # Per-page text list
+          "raw_text": str,
+          "pages": [str, ...],
           "word_count": int,
         }
     """
@@ -194,7 +201,7 @@ Scoring guidelines:
 
 def score_job_match(
     *,
-    client: anthropic.Anthropic,
+    client: GeminiClient,
     resume_text: str,
     job_title: str,
     job_description: str,
@@ -205,7 +212,6 @@ def score_job_match(
 
     Returns the parsed JSON dict (see MATCH_SYSTEM_PROMPT schema).
     """
-    # Truncate inputs to stay within context limits
     resume_snippet = resume_text[:6000]
     jd_snippet = job_description[:4000]
 
@@ -260,25 +266,15 @@ For custom free-text questions, set value to "__GENERATE_ANSWER__:<the question 
 
 def extract_field_mappings(
     *,
-    client: anthropic.Anthropic,
+    client: GeminiClient,
     form_fields: list[dict[str, Any]],
     candidate_profile: dict[str, Any],
     job_id: int | None = None,
 ) -> dict[str, str]:
     """
-    Given raw form field metadata (label, type, options), return a mapping
-    of {field_label: value_to_fill}.
-
-    Args:
-        form_fields: List of dicts like:
-            {"label": "First Name", "type": "text", "selector": "#firstName", "options": []}
-        candidate_profile: Dict with candidate's personal info (from config + resume).
-        job_id: For cost attribution.
-
-    Returns:
-        {"#firstName": "John", "#lastName": "Doe", ...}
+    Given raw form field metadata, return a mapping of {field_label: value_to_fill}.
     """
-    fields_json = json.dumps(form_fields, indent=2)
+    fields_json  = json.dumps(form_fields, indent=2)
     profile_json = json.dumps(candidate_profile, indent=2)
 
     user_message = f"""
@@ -304,7 +300,7 @@ Map each field to the correct value. Return ONLY the JSON object.
     return mappings
 
 
-# Module 4 — Short Answer Generator (custom questions)
+# Module 4 — Short Answer Generator
 
 SHORT_ANSWER_SYSTEM_PROMPT = """
 You are writing job application answers on behalf of a candidate.
@@ -320,26 +316,14 @@ Return ONLY the answer text. No labels, no JSON, no quotes around the answer.
 
 def generate_short_answer(
     *,
-    client: anthropic.Anthropic,
+    client: GeminiClient,
     question: str,
     resume_text: str,
     job_title: str,
     company_name: str,
     job_id: int | None = None,
 ) -> str:
-    """
-    Generate a context-aware 3-sentence answer to a custom application question.
-
-    Args:
-        question     : The exact question text from the form.
-        resume_text  : Full resume text for context grounding.
-        job_title    : Target job title for relevance.
-        company_name : Target company for personalization.
-        job_id       : For cost attribution.
-
-    Returns:
-        Plain string — the answer to type into the form field.
-    """
+    """Generate a context-aware 3-sentence answer to a custom application question."""
     user_message = f"""
 QUESTION: {question}
 
@@ -382,7 +366,7 @@ Return ONLY the letter body. No subject line, no signature block, no JSON.
 
 def generate_cover_letter(
     *,
-    client: anthropic.Anthropic,
+    client: GeminiClient,
     resume_text: str,
     job_title: str,
     company_name: str,
@@ -390,11 +374,7 @@ def generate_cover_letter(
     matched_skills: list[str],
     job_id: int | None = None,
 ) -> str:
-    """
-    Generate a tailored cover letter body for the given job.
-
-    Returns plain text — the 3-paragraph cover letter body.
-    """
+    """Generate a tailored cover letter body for the given job."""
     user_message = f"""
 JOB: {job_title} at {company_name}
 
@@ -422,8 +402,8 @@ Write the 3-paragraph cover letter body.
     return letter
 
 
-# Factory — single client instance for callers
+# Factory
 
-def build_llm_client(api_key: str) -> anthropic.Anthropic:
-    """Create and return a configured Anthropic client."""
-    return anthropic.Anthropic(api_key=api_key)
+def build_llm_client(api_key: str) -> GeminiClient:
+    """Create and return a configured GeminiClient."""
+    return GeminiClient(api_key)

@@ -41,7 +41,7 @@ class ResumeMatcher:
 
     def __init__(self, config: AppConfig):
         self.config     = config
-        self.llm_client = build_llm_client(config.gemini_api_key)
+        self.llm_client = build_llm_client(config.groq_api_key)
         self.resume     = parse_resume(config.resume_pdf_path)
         logger.info(
             f"ResumeMatcher ready | "

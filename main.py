@@ -208,7 +208,7 @@ async def main(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     init_db()
-    llm_client = build_llm_client(config.gemini_api_key)
+    llm_client = build_llm_client(config.groq_api_key)
 
     phase = args.phase.lower()
     feed_path = Path(args.feed) if args.feed else None

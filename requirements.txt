@@ -6,8 +6,8 @@
 playwright==1.44.0              # Browser automation (Chromium)
 
 # AI / LLM
-google-genai>=1.0.0     # Google Gemini API client (free tier available)
-                                # Get a key at: https://aistudio.google.com/app/apikey
+groq>=0.9.0                    # Groq API client (free tier, EU-friendly)
+                                # Get a free key at https://console.groq.com (no EU restrictions)
 
 # Resume parsing
 pdfplumber==0.11.0              # PDF text extraction (handles multi-column)

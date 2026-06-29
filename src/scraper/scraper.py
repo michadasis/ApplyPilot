@@ -1,21 +1,28 @@
 """
-scraper.py — Job Scraper / Ingestor Module
+scraper.py — Multi-source Job Scraper
 
-Fetches job listings from the RemoteOK public JSON API and persists
-them to SQLite. Falls back to a local JSON feed for offline testing
-or curated job lists.
+All sources are free, require no authentication, and return CS-relevant jobs.
 
-RemoteOK API:
-  - Public, no auth required.
-  - Base URL: https://remoteok.com/api
-  - Filter by tag: https://remoteok.com/api?tag=python
-  - First element of the response array is a legal notice — skip it.
-  - Rate limit: be polite; we sleep 1 s between tag requests.
+Sources (JSON API):
+  1. Remotive       — remotive.com/api/remote-jobs
+  2. Arbeitnow      — arbeitnow.com/api/job-board-api  (EU-heavy, great for GR)
+  3. Jobicy         — jobicy.com/api/v2/remote-jobs
+  4. Himalayas      — himalayas.app/jobs/api
+  5. The Muse       — themuse.com/api/public/jobs
+  6. HN Who's Hiring — hn.algolia.com (monthly Ask HN thread)
+
+Sources (RSS / XML):
+  7. We Work Remotely — weworkremotely.com
+  8. Remote.co        — remote.co
+
+Fallback:
+  JSONFeedIngestor — reads a local jobs.json you curate manually
 """
 
 import asyncio
 import json
 import logging
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncGenerator
@@ -27,39 +34,22 @@ from src.tracker.schema import upsert_job
 
 logger = logging.getLogger(__name__)
 
-REMOTEOK_BASE_URL = "https://remoteok.com/api"
-REQUEST_TIMEOUT   = 30   # seconds
-POLITE_DELAY      = 1.0  # seconds between tag requests
+REQUEST_TIMEOUT  = 10
+POLITE_DELAY     = 0.5   # seconds between requests to the same host
 
-# Maps common job-title keywords → RemoteOK tag slugs
-TITLE_TO_TAG: dict[str, str] = {
-    "python":             "python",
-    "javascript":         "javascript",
-    "typescript":         "typescript",
-    "react":              "react",
-    "node":               "node",
-    "backend":            "backend",
-    "front end":          "frontend",
-    "frontend":           "frontend",
-    "full stack":         "fullstack",
-    "fullstack":          "fullstack",
-    "software engineer":  "software-engineer",
-    "software developer": "dev",
-    "web developer":      "web",
-    "devops":             "devops",
-    "go ":                "golang",
-    "golang":             "golang",
-    "rust":               "rust",
-    "java ":              "java",
-    "kotlin":             "kotlin",
-    "ios":                "ios",
-    "android":            "android",
-    "machine learning":   "machine-learning",
-    "data science":       "data-science",
+TECH_KEYWORDS = {
+    "software", "developer", "engineer", "backend", "back-end", "frontend",
+    "front-end", "fullstack", "full-stack", "python", "javascript",
+    "typescript", "node", "react", "vue", "angular", "django", "flask",
+    "fastapi", "api", "devops", "sre", "platform", "cloud", "data",
+    "machine learning", "ml", "ai", "web", "mobile", "ios", "android",
+    "kotlin", "swift", "rust", "golang", "java ", "scala", "ruby",
+    "php", "c++", "csharp", "c#", "qa", "automation", "test",
+    "database", "sql", "nosql", "security", "cyber", "blockchain",
+    "embedded", "firmware", "systems", "infrastructure", "architect",
+    "tech lead", "engineering manager",
 }
 
-
-# Data model
 
 @dataclass
 class JobListing:
@@ -71,162 +61,494 @@ class JobListing:
     source:      str
 
 
-# RemoteOK Scraper
+def _is_relevant(title: str, exclude_keywords: list[str]) -> bool:
+    t = title.lower()
+    if any(kw.lower() in t for kw in exclude_keywords):
+        return False
+    return any(kw in t for kw in TECH_KEYWORDS)
 
-class RemoteOKScraper:
+
+# ── Source 1: Remotive ────────────────────────────────────────────────────────
+
+async def _fetch_remotive(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    categories = ["software-dev", "devops-sysadmin", "data"]
+    results: list[JobListing] = []
+    seen: set[str] = set()
+
+    for cat in categories:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(
+                "https://remotive.com/api/remote-jobs",
+                params={"category": cat, "limit": 100},
+            )
+            r.raise_for_status()
+            for job in r.json().get("jobs", []):
+                uid = str(job.get("id", ""))
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                url = job.get("url", "") or job.get("apply_url", "")
+                if not url:
+                    continue
+                results.append(JobListing(
+                    title       = job.get("title", ""),
+                    company     = job.get("company_name", ""),
+                    location    = job.get("candidate_required_location", "Remote"),
+                    description = job.get("description", ""),
+                    apply_url   = url,
+                    source      = "remotive",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.warning(f"Remotive/{cat} error: {e}")
+
+    logger.info(f"Remotive: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 2: Arbeitnow ───────────────────────────────────────────────────────
+
+async def _fetch_arbeitnow(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    results: list[JobListing] = []
+    page = 1
+    seen: set[str] = set()
+
+    while len(results) < max_results:
+        try:
+            r = await client.get(
+                "https://www.arbeitnow.com/api/job-board-api",
+                params={"page": page},
+            )
+            r.raise_for_status()
+            data = r.json()
+            jobs = data.get("data", [])
+            if not jobs:
+                break
+            for job in jobs:
+                slug = job.get("slug", "")
+                if slug in seen:
+                    continue
+                seen.add(slug)
+                url = job.get("url", "")
+                if not url:
+                    continue
+                results.append(JobListing(
+                    title       = job.get("title", ""),
+                    company     = job.get("company_name", ""),
+                    location    = job.get("location", "Remote"),
+                    description = job.get("description", ""),
+                    apply_url   = url,
+                    source      = "arbeitnow",
+                ))
+            page += 1
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.warning(f"Arbeitnow/p{page} error: {e}")
+            break
+
+    logger.info(f"Arbeitnow: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 3: Jobicy ──────────────────────────────────────────────────────────
+
+async def _fetch_jobicy(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    tags = ["dev", "python", "javascript", "typescript", "fullstack", "backend"]
+    results: list[JobListing] = []
+    seen: set[str] = set()
+
+    for tag in tags:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(
+                "https://jobicy.com/api/v2/remote-jobs",
+                params={"count": 50, "tag": tag},
+            )
+            r.raise_for_status()
+            for job in r.json().get("jobs", []):
+                uid = str(job.get("id", ""))
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                url = job.get("url", "")
+                if not url:
+                    continue
+                results.append(JobListing(
+                    title       = job.get("jobTitle", ""),
+                    company     = job.get("companyName", ""),
+                    location    = job.get("jobGeo", "Remote"),
+                    description = job.get("jobDescription", ""),
+                    apply_url   = url,
+                    source      = "jobicy",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.warning(f"Jobicy/{tag} error: {e}")
+
+    logger.info(f"Jobicy: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 4: Himalayas ───────────────────────────────────────────────────────
+
+async def _fetch_himalayas(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    results: list[JobListing] = []
+    offset = 0
+    seen: set[str] = set()
+
+    while len(results) < max_results:
+        try:
+            r = await client.get(
+                "https://himalayas.app/jobs/api",
+                params={"limit": 20, "offset": offset},
+            )
+            r.raise_for_status()
+            jobs = r.json().get("jobs", [])
+            if not jobs:
+                break
+            for job in jobs:
+                uid = str(job.get("slug", job.get("id", "")))
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                # Apply URL is the Himalayas listing page which links out
+                url = job.get("applicationLink") or job.get("url") or \
+                      f"https://himalayas.app/jobs/{uid}"
+                results.append(JobListing(
+                    title       = job.get("title", ""),
+                    company     = job.get("companyName", ""),
+                    location    = job.get("location", "Remote"),
+                    description = job.get("description", ""),
+                    apply_url   = url,
+                    source      = "himalayas",
+                ))
+            offset += 20
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.warning(f"Himalayas/offset={offset} error: {e}")
+            break
+
+    logger.info(f"Himalayas: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 5: The Muse ────────────────────────────────────────────────────────
+
+async def _fetch_themuse(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    categories = ["Computer and IT", "Data Science", "Software Engineer",
+                  "IT Infrastructure", "QA", "Product Management"]
+    results: list[JobListing] = []
+    seen: set[str] = set()
+
+    for cat in categories:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(
+                "https://www.themuse.com/api/public/jobs",
+                params={"category": cat, "page": 1},
+            )
+            r.raise_for_status()
+            for job in r.json().get("results", []):
+                uid = str(job.get("id", ""))
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                url = (job.get("refs", {}) or {}).get("landing_page", "")
+                if not url:
+                    continue
+                company = (job.get("company", {}) or {}).get("name", "")
+                locations = [
+                    loc.get("name", "") for loc in (job.get("locations", []) or [])
+                ]
+                results.append(JobListing(
+                    title       = job.get("name", ""),
+                    company     = company,
+                    location    = ", ".join(locations) or "Remote",
+                    description = job.get("contents", ""),
+                    apply_url   = url,
+                    source      = "themuse",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.warning(f"TheMuse/{cat} error: {e}")
+
+    logger.info(f"TheMuse: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 6: We Work Remotely (RSS) ─────────────────────────────────────────
+
+async def _fetch_weworkremotely(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    feeds = [
+        "https://weworkremotely.com/categories/remote-programming-jobs.rss",
+        "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss",
+        "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
+    ]
+    results: list[JobListing] = []
+    seen: set[str] = set()
+
+    for feed_url in feeds:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(feed_url)
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item"):
+                link  = (item.findtext("link") or "").strip()
+                title = (item.findtext("title") or "").strip()
+                desc  = (item.findtext("description") or "").strip()
+                # WWR titles look like "Company: Job Title"
+                if ": " in title:
+                    company, title = title.split(": ", 1)
+                else:
+                    company = ""
+                if link in seen or not link:
+                    continue
+                seen.add(link)
+                results.append(JobListing(
+                    title       = title,
+                    company     = company,
+                    location    = "Remote",
+                    description = desc,
+                    apply_url   = link,
+                    source      = "weworkremotely",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.warning(f"WeWorkRemotely error: {e}")
+
+    logger.info(f"WeWorkRemotely: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 7: Remote.co (RSS) ─────────────────────────────────────────────────
+
+async def _fetch_remoteco(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    feeds = [
+        "https://remote.co/remote-jobs/developer/feed/",
+        "https://remote.co/remote-jobs/engineer/feed/",
+    ]
+    results: list[JobListing] = []
+    seen: set[str] = set()
+
+    for feed_url in feeds:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(feed_url)
+            r.raise_for_status()
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item"):
+                link  = (item.findtext("link") or "").strip()
+                title = (item.findtext("title") or "").strip()
+                desc  = (item.findtext("description") or "").strip()
+                if link in seen or not link:
+                    continue
+                seen.add(link)
+                results.append(JobListing(
+                    title       = title,
+                    company     = "",
+                    location    = "Remote",
+                    description = desc,
+                    apply_url   = link,
+                    source      = "remoteco",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.warning(f"Remote.co error: {e}")
+
+    logger.info(f"Remote.co: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 8: HN Who's Hiring (Algolia) ──────────────────────────────────────
+
+async def _fetch_hn_hiring(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
     """
-    Fetches remote job listings from RemoteOK's public JSON API.
+    Queries the latest Hacker News 'Ask HN: Who is hiring?' thread via Algolia.
+    Each comment is a raw job posting — we parse title/company/url heuristically.
+    """
+    results: list[JobListing] = []
+    try:
+        # Find the latest "Who is hiring" story
+        r = await client.get(
+            "https://hn.algolia.com/api/v1/search",
+            params={
+                "query": "Ask HN: Who is hiring",
+                "tags": "story",
+                "hitsPerPage": 1,
+            },
+        )
+        r.raise_for_status()
+        hits = r.json().get("hits", [])
+        if not hits:
+            return results
+        story_id = hits[0]["objectID"]
 
-    Derives relevant API tag slugs from the job titles configured in
-    config.json, makes one request per tag, de-duplicates by job ID,
-    and filters out excluded keywords.
+        # Fetch top-level comments
+        r2 = await client.get(
+            "https://hn.algolia.com/api/v1/search",
+            params={
+                "tags": f"comment,story_{story_id}",
+                "hitsPerPage": 100,
+            },
+        )
+        r2.raise_for_status()
+        for hit in r2.json().get("hits", []):
+            text = hit.get("comment_text", "") or ""
+            if not text:
+                continue
+            # First line usually: "Company | Role | Location | ..."
+            first_line = text.split("<p>")[0].strip()
+            parts = [p.strip() for p in first_line.split("|")]
+            company = parts[0] if parts else "Unknown"
+            title   = parts[1] if len(parts) > 1 else "Software Engineer"
+            url     = f"https://news.ycombinator.com/item?id={hit['objectID']}"
+            results.append(JobListing(
+                title       = title,
+                company     = company,
+                location    = parts[2] if len(parts) > 2 else "Remote",
+                description = text,
+                apply_url   = url,
+                source      = "hn_hiring",
+            ))
+            if len(results) >= max_results:
+                break
+    except Exception as e:
+        logger.warning(f"HN Hiring error: {e}")
 
-    Usage:
-        scraper = RemoteOKScraper(config)
-        async for job in scraper.scrape(max_results=50):
-            db_id = upsert_job(...)
+    logger.info(f"HN Who's Hiring: {len(results)} jobs fetched")
+    return results
+
+
+# ── Multi-source aggregator ───────────────────────────────────────────────────
+
+class MultiSourceScraper:
+    """
+    Aggregates jobs from all 8 free, no-auth sources in parallel.
+    Applies relevance + exclusion filtering before yielding.
     """
 
     HEADERS = {
-        "User-Agent": "ApplyPilot/1.0 job-application-bot",
-        "Accept":     "application/json",
+        "User-Agent": "ApplyPilot/1.0 job-search-bot",
+        "Accept":     "application/json, text/xml, */*",
     }
 
-    def __init__(self, config: AppConfig):
+    FETCHERS = [
+        ("remotive",       _fetch_remotive),
+        ("arbeitnow",      _fetch_arbeitnow),
+        ("jobicy",         _fetch_jobicy),
+        ("himalayas",      _fetch_himalayas),
+        ("themuse",        _fetch_themuse),
+        ("weworkremotely", _fetch_weworkremotely),
+        ("hn_hiring",      _fetch_hn_hiring),
+    ]
+
+    def __init__(self, config: AppConfig) -> None:
         self.config = config
 
-    def _tag_urls(self) -> list[str]:
-        """
-        Build a deduplicated list of RemoteOK tag URLs from the
-        configured job titles.  Falls back to the generic /api endpoint
-        if no title matches a known tag.
-        """
-        tags: set[str] = set()
-        for title in self.config.search.titles:
-            title_lower = title.lower()
-            for keyword, tag in TITLE_TO_TAG.items():
-                if keyword in title_lower:
-                    tags.add(tag)
-
-        if not tags:
-            logger.info("No title→tag mapping found; fetching all remote dev jobs")
-            return [REMOTEOK_BASE_URL + "?tag=dev"]
-
-        return [f"{REMOTEOK_BASE_URL}?tag={tag}" for tag in sorted(tags)]
-
     async def scrape(
-        self,
-        max_results: int = 50,
+        self, max_results: int = 100
     ) -> AsyncGenerator[JobListing, None]:
         """
-        Async generator — yields JobListing objects from RemoteOK.
-
-        Fetches each tag URL in sequence, de-duplicates across tags,
-        and stops once max_results jobs have been yielded.
+        Fetch from all sources concurrently, then yield de-duplicated,
+        relevance-filtered jobs up to max_results.
         """
-        seen_ids: set[str] = set()
-        yielded  = 0
-        urls     = self._tag_urls()
+        per_source = max(20, max_results // len(self.FETCHERS))
 
         async with httpx.AsyncClient(
             headers=self.HEADERS,
             timeout=REQUEST_TIMEOUT,
             follow_redirects=True,
         ) as client:
-            for url in urls:
-                if yielded >= max_results:
-                    break
+            SOURCE_TIMEOUT = 15   # seconds — any single source hanging beyond this is cancelled
 
+            async def _safe_fetch(name: str, fetcher, max_r: int):
                 try:
-                    logger.info(f"RemoteOK → {url}")
-                    resp = await client.get(url)
-                    resp.raise_for_status()
-                    raw_list: list = resp.json()
-                except Exception as e:
-                    logger.warning(f"RemoteOK request failed ({url}): {e}")
-                    continue
-
-                for raw in raw_list:
-                    if yielded >= max_results:
-                        break
-
-                    # Skip the legal-notice object (first element)
-                    if not isinstance(raw, dict) or "position" not in raw:
-                        continue
-
-                    job_id = str(raw.get("id", ""))
-                    if job_id in seen_ids:
-                        continue
-                    seen_ids.add(job_id)
-
-                    title = raw.get("position", "").strip()
-                    if not title or self._is_excluded(title) or not self._is_relevant(title):
-                        continue
-
-                    apply_url = (raw.get("apply_url") or raw.get("url") or "").strip()
-                    if not apply_url:
-                        continue
-
-                    # Prepend tag list to description so the LLM scorer has it
-                    tags_str    = ", ".join(raw.get("tags", []))
-                    description = raw.get("description", "").strip()
-                    if tags_str:
-                        description = f"Skills/Tags: {tags_str}\n\n{description}"
-
-                    yield JobListing(
-                        title       = title,
-                        company     = raw.get("company", "Unknown").strip(),
-                        location    = raw.get("location", "Remote").strip() or "Remote",
-                        description = description,
-                        apply_url   = apply_url,
-                        source      = "remoteok",
+                    return await asyncio.wait_for(
+                        fetcher(client, max_r), timeout=SOURCE_TIMEOUT
                     )
-                    yielded += 1
+                except asyncio.TimeoutError:
+                    logger.warning(f"{name}: timed out after {SOURCE_TIMEOUT}s — skipping")
+                    return []
+                except Exception as e:
+                    logger.warning(f"{name}: error — {e}")
+                    return []
 
-                # Polite delay between tag requests
-                if urls.index(url) < len(urls) - 1:
-                    await asyncio.sleep(POLITE_DELAY)
+            tasks = [
+                _safe_fetch(name, fetcher, per_source)
+                for name, fetcher in self.FETCHERS
+            ]
+            all_results = await asyncio.gather(*tasks)
 
-        logger.info(f"RemoteOK scrape complete — {yielded} jobs fetched")
+        seen_urls: set[str] = set()
+        yielded   = 0
+
+        for batch in all_results:
+            for job in batch:
+                if yielded >= max_results:
+                    return
+                if not job.apply_url or job.apply_url in seen_urls:
+                    continue
+                if not job.title:
+                    continue
+                if not _is_relevant(job.title, self.config.search.exclude_keywords):
+                    continue
+                seen_urls.add(job.apply_url)
+                yielded += 1
+                yield job
+
+        logger.info(f"Multi-source scrape complete — {yielded} jobs total")
 
 
-# JSON Feed Ingestor (generic fallback / custom feeds)
+# ── JSON Feed fallback ────────────────────────────────────────────────────────
 
 class JSONFeedIngestor:
     """
-    Reads jobs from a local JSON file.
+    Reads jobs from a local JSON file you maintain manually.
 
-    Expected format (array of objects):
+    Format:
     [
       {
-        "title":       "Backend Engineer",
-        "company":     "Acme Corp",
-        "location":    "Remote",
-        "description": "We are looking for...",
-        "apply_url":   "https://jobs.lever.co/acme/abc123"
-      },
-      ...
+        "title": "Backend Engineer",
+        "company": "Acme",
+        "location": "Remote",
+        "description": "...",
+        "apply_url": "https://..."
+      }
     ]
-
-    Useful for:
-      - Curated job lists exported from any job board
-      - Internal testing without live API calls
-      - Custom company career page exports
     """
 
-    def __init__(self, feed_path: Path | str):
+    def __init__(self, feed_path: Path | str) -> None:
         self.feed_path = Path(feed_path)
 
     async def ingest(self) -> AsyncGenerator[JobListing, None]:
-        """Yield JobListing objects from the JSON feed file."""
         if not self.feed_path.exists():
             raise FileNotFoundError(f"JSON feed not found: {self.feed_path}")
-
         with open(self.feed_path) as f:
             jobs: list[dict] = json.load(f)
-
-        logger.info(f"JSON feed loaded: {len(jobs)} jobs from {self.feed_path}")
-
+        logger.info(f"JSON feed: {len(jobs)} jobs from {self.feed_path}")
         for raw in jobs:
             yield JobListing(
                 title       = raw.get("title",       "Unknown"),
@@ -238,24 +560,20 @@ class JSONFeedIngestor:
             )
 
 
-# Orchestration helper — save scraped jobs to DB
+# ── Orchestration helper ──────────────────────────────────────────────────────
 
 async def ingest_and_store(
-    scraper: RemoteOKScraper | JSONFeedIngestor,
+    scraper: MultiSourceScraper | JSONFeedIngestor,
     config:  AppConfig,
-    max_results: int = 50,
+    max_results: int = 100,
 ) -> list[int]:
-    """
-    Run a scraper and persist all discovered jobs to SQLite.
+    """Run scraper and persist all jobs to SQLite. Returns stored job IDs."""
+    new_ids: list[int] = []
 
-    Returns list of job IDs that were inserted or already existed.
-    """
-    new_job_ids: list[int] = []
-
-    if isinstance(scraper, JSONFeedIngestor):
-        source = scraper.ingest()
-    else:
-        source = scraper.scrape(max_results=max_results)
+    source = (
+        scraper.ingest() if isinstance(scraper, JSONFeedIngestor)
+        else scraper.scrape(max_results=max_results)
+    )
 
     async for job in source:
         if not job.apply_url:
@@ -268,49 +586,8 @@ async def ingest_and_store(
             description = job.description,
             location    = job.location,
         )
-        new_job_ids.append(job_id)
-        logger.info(f"Stored [{job_id}] {job.title} @ {job.company}")
+        new_ids.append(job_id)
+        logger.info(f"Stored [{job_id}] {job.title} @ {job.company} ({job.source})")
 
-    logger.info(f"Ingestion complete — {len(new_job_ids)} jobs stored/updated")
-    return new_job_ids
-
-
-# Internal helper shared by both scrapers
-
-def _is_excluded(title: str, exclude_keywords: list[str]) -> bool:
-    title_lower = title.lower()
-    return any(kw.lower() in title_lower for kw in exclude_keywords)
-
-
-# Patch the method onto both classes so they don't need to duplicate the logic
-RemoteOKScraper._is_excluded = lambda self, t: _is_excluded(
-    t, self.config.search.exclude_keywords
-)
-
-# Keywords derived from each configured title — any one match keeps the job
-_RELEVANCE_KEYWORDS = [
-    "software", "developer", "engineer", "backend", "back-end",
-    "frontend", "front-end", "fullstack", "full-stack", "full stack",
-    "python", "javascript", "typescript", "node", "react",
-    "web dev", "devops", "sre", "platform", "api", "cloud",
-]
-
-def _is_relevant(title: str, search_titles: list[str]) -> bool:
-    """
-    Return True if the job title plausibly matches what we're looking for.
-
-    Checks against both the user's configured titles and a broad set of
-    tech-role keywords so we don't miss slightly differently-worded roles.
-    """
-    title_lower = title.lower()
-    # Match any configured target title word
-    for target in search_titles:
-        for word in target.lower().split():
-            if len(word) > 3 and word in title_lower:
-                return True
-    # Match broad tech-role vocabulary
-    return any(kw in title_lower for kw in _RELEVANCE_KEYWORDS)
-
-RemoteOKScraper._is_relevant = lambda self, t: _is_relevant(
-    t, self.config.search.titles
-)
+    logger.info(f"Ingestion complete — {len(new_ids)} jobs stored/updated")
+    return new_ids

@@ -34,13 +34,11 @@ import logging
 import sys
 from pathlib import Path
 
-from playwright.async_api import async_playwright
 
 from src.config.config_manager import load_config, write_example_config
-from src.filler.form_filler import FormFillerEngine, build_browser_context
 from src.matcher.llm_orchestrator import build_llm_client
 from src.matcher.resume_matcher import ResumeMatcher
-from src.scraper.scraper import RemoteOKScraper, JSONFeedIngestor, ingest_and_store
+from src.scraper.scraper import MultiSourceScraper, JSONFeedIngestor, ingest_and_store
 from src.tracker.schema import init_db, update_job_status
 from src.tracker.tracker import (
     ApplicationTracker,
@@ -63,7 +61,7 @@ async def run_scrape_phase(config, feed_path: Path | None = None) -> None:
     if feed_path:
         scraper = JSONFeedIngestor(feed_path)
     else:
-        scraper = RemoteOKScraper(config)
+        scraper = MultiSourceScraper(config)
 
     await ingest_and_store(
         scraper,
@@ -85,22 +83,28 @@ def run_score_phase(config) -> None:
 
 async def run_apply_phase(
     config,
-    context,
     llm_client,
-    dry_run: bool = False,
     specific_job_id: int | None = None,
 ) -> None:
-    """Phase 3: Fill and submit application forms."""
+    """
+    Phase 3: For each scored job —
+      1. Generate a tailored cover letter + Q&A pack via Groq
+      2. Save the pack to data/packs/job_{id}.txt
+      3. Print everything to the terminal for easy copy-pasting
+      4. Open the apply URL in the default browser
+      5. Wait for Enter (applied) / s (skip) / q (quit)
+    """
+    import webbrowser
+    import json as _json
+    import textwrap
+    from pathlib import Path as _Path
+    from src.matcher.llm_orchestrator import generate_application_pack
+    from src.matcher.resume_matcher import ResumeMatcher
+
     logger.info("═" * 50)
     logger.info("PHASE 3: APPLYING")
     logger.info("═" * 50)
 
-    # If dry_run, force manual_review=True so we never auto-submit
-    if dry_run:
-        config.behavior.require_manual_review = True
-        logger.info("🧪 DRY RUN mode — forms will be filled but submission requires manual confirm")
-
-    # Fetch jobs to process
     if specific_job_id:
         from src.tracker.schema import get_db
         with get_db() as conn:
@@ -116,78 +120,166 @@ async def run_apply_phase(
         )
 
     if not jobs:
-        logger.info("No jobs queued for application. Run scrape + score phases first.")
+        logger.info("No jobs queued. Run scrape + score phases first.")
         return
 
-    logger.info(f"Applying to {len(jobs)} job(s)...")
-
-    engine  = FormFillerEngine(config, llm_client)
+    # Load resume once
     matcher = ResumeMatcher(config)
+    resume_text = matcher.resume_text
 
-    for job in jobs:
-        job_id = job["id"]
-        logger.info(f"\n{'─' * 50}")
-        logger.info(f"Applying: [{job_id}] {job['title']} @ {job['company']}")
-        logger.info(f"URL: {job['apply_url']}")
+    packs_dir = _Path("data/packs")
+    packs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Mark as 'applying' to prevent duplicate runs
-        update_job_status(job_id, "applying")
+    total   = len(jobs)
+    applied = 0
+    skipped = 0
 
-        tracker = ApplicationTracker(job_id=job_id)
-        match_data = matcher.get_match_data(job_id)
+    W = 70   # terminal width for separators
+
+    print(f"\n{'═' * W}")
+    print(f"  {total} job(s) ready  —  Enter=applied  s=skip  q=quit")
+    print(f"{'═' * W}\n")
+
+    for i, job in enumerate(jobs, 1):
+        job_id    = job["id"]
+        score_pct = int((job.get("match_score") or 0) * 100)
+        title     = job["title"]
+        company   = job["company"]
+
+        matched_skills: list[str] = []
+        if job.get("matched_skills"):
+            try:
+                matched_skills = _json.loads(job["matched_skills"])
+            except Exception:
+                pass
+
+        # ── Job header ────────────────────────────────────────────
+        print(f"[{i}/{total}] {title} @ {company}")
+        print(f"      Score    : {score_pct}%")
+        print(f"      Source   : {job.get('source', '?')}")
+        print(f"      Location : {job.get('location', '?')}")
+        if job.get("match_rationale"):
+            print(f"      Why      : {job['match_rationale']}")
+        if matched_skills:
+            print(f"      Skills   : {', '.join(matched_skills[:6])}")
+        print(f"      URL      : {job['apply_url']}")
+
+        # ── Generate application pack ─────────────────────────────
+        print(f"\n  Generating cover letter + Q&A... ", end="", flush=True)
+        pack_path = packs_dir / f"job_{job_id}_{company.replace(' ', '_')[:30]}.txt"
 
         try:
-            # Detect ATS type for tracker
-            from src.filler.form_filler import detect_ats_type
-            ats_type = detect_ats_type(job["apply_url"])
-            tracker.start(ats_type=ats_type)
-            tracker.record_step("apply_start", {"url": job["apply_url"]})
-
-            result = await engine.apply(
-                job_id=job_id,
-                apply_url=job["apply_url"],
-                job_title=job["title"],
-                company_name=job["company"],
+            pack = generate_application_pack(
+                client=llm_client,
+                resume_text=resume_text,
+                job_title=title,
+                company_name=company,
                 job_description=job.get("description", ""),
-                match_data=match_data,
-                context=context,
+                matched_skills=matched_skills,
+                job_id=job_id,
             )
-
-            tracker.record_step("apply_complete", {
-                "success":   result.success,
-                "submitted": result.submitted,
-                "ats_type":  result.ats_type,
-            })
-
-            tracker.finish(
-                success=result.success,
-                submitted=result.submitted,
-                cover_letter=result.cover_letter_text,
-                answers=result.answers_json,
-                error_message=result.error_message,
-                screenshot_path=result.screenshot_path,
-            )
-
-            if result.success:
-                logger.info(
-                    f"✅ Job {job_id} — "
-                    f"{'SUBMITTED' if result.submitted else 'FILLED (review pending)'}"
-                )
-            else:
-                logger.error(f"❌ Job {job_id} failed: {result.error_message}")
-
-            # Retry logic
-            if not result.success and config.behavior.retry_failed_attempts > 0:
-                logger.info(f"Retrying job {job_id} (attempt 2)...")
-                update_job_status(job_id, "queued")   # re-queue for retry
-
+            print("done.\n")
         except Exception as e:
-            logger.error(f"Unexpected error on job {job_id}: {e}", exc_info=True)
-            update_job_status(job_id, "failed")
-            tracker.finish(success=False, error_message=str(e))
+            print(f"failed ({e}).\n")
+            pack = {}
 
-        # Polite delay between applications
-        await asyncio.sleep(3)
+        # ── Display cover letter ──────────────────────────────────
+        cover = pack.get("cover_letter", "")
+        answers = pack.get("answers", {})
+        pitch = pack.get("elevator_pitch", "")
+        talking_points = pack.get("key_talking_points", [])
+
+        divider = f"  {'─' * (W - 2)}"
+
+        if cover:
+            print(f"  ┌─ COVER LETTER {'─' * (W - 17)}")
+            for para in cover.strip().split("\n\n"):
+                wrapped = textwrap.fill(para.strip(), width=W - 4,
+                                        initial_indent="  │  ",
+                                        subsequent_indent="  │  ")
+                print(wrapped)
+                print("  │")
+            print(f"  └{'─' * (W - 1)}\n")
+
+        if answers:
+            print(f"  ┌─ COMMON QUESTIONS & ANSWERS {'─' * (W - 31)}")
+            for q, a in answers.items():
+                print(f"  │  Q: {q}")
+                wrapped_a = textwrap.fill(a.strip(), width=W - 7,
+                                          initial_indent="  │  A: ",
+                                          subsequent_indent="  │     ")
+                print(wrapped_a)
+                print("  │")
+            print(f"  └{'─' * (W - 1)}\n")
+
+        if pitch:
+            print(f"  ┌─ ELEVATOR PITCH {'─' * (W - 19)}")
+            wrapped_p = textwrap.fill(pitch.strip(), width=W - 4,
+                                      initial_indent="  │  ",
+                                      subsequent_indent="  │  ")
+            print(wrapped_p)
+            print(f"  └{'─' * (W - 1)}\n")
+
+        if talking_points:
+            print(f"  ┌─ KEY TALKING POINTS {'─' * (W - 23)}")
+            for pt in talking_points:
+                print(f"  │  • {pt}")
+            print(f"  └{'─' * (W - 1)}\n")
+
+        # ── Save pack to file ─────────────────────────────────────
+        if pack:
+            try:
+                with open(pack_path, "w", encoding="utf-8") as f:
+                    f.write(f"JOB: {title} @ {company}\n")
+                    f.write(f"URL: {job['apply_url']}\n")
+                    f.write(f"SCORE: {score_pct}%\n\n")
+                    if cover:
+                        f.write("=== COVER LETTER ===\n\n")
+                        f.write(cover.strip() + "\n\n")
+                    if answers:
+                        f.write("=== Q&A ===\n\n")
+                        for q, a in answers.items():
+                            f.write(f"Q: {q}\nA: {a}\n\n")
+                    if pitch:
+                        f.write("=== ELEVATOR PITCH ===\n\n")
+                        f.write(pitch.strip() + "\n\n")
+                    if talking_points:
+                        f.write("=== KEY TALKING POINTS ===\n\n")
+                        for pt in talking_points:
+                            f.write(f"• {pt}\n")
+                print(f"  💾 Saved to {pack_path}\n")
+            except Exception as e:
+                logger.warning(f"Could not save pack: {e}")
+
+        # ── Open browser ──────────────────────────────────────────
+        try:
+            webbrowser.open(job["apply_url"])
+        except Exception as e:
+            logger.warning(f"Could not open browser: {e}")
+
+        loop = asyncio.get_running_loop()
+        answer = await loop.run_in_executor(
+            None,
+            lambda: input(f"  → Enter=applied  s=skip  q=quit: ").strip().lower(),
+        )
+
+        if answer == "q":
+            print("\nStopping apply phase.")
+            break
+        elif answer == "s":
+            update_job_status(job_id, "skipped")
+            skipped += 1
+            print(f"  Skipped.\n")
+        else:
+            update_job_status(job_id, "applied")
+            applied += 1
+            print(f"  ✅ Marked as applied.\n")
+
+        print(f"  {'═' * (W - 2)}\n")
+
+    print(f"  Session: {applied} applied | {skipped} skipped | "
+          f"{total - applied - skipped} remaining")
+    print(f"  Packs saved in: {packs_dir.resolve()}\n")
 
 
 # Main entry point
@@ -213,26 +305,14 @@ async def main(args: argparse.Namespace) -> None:
     phase = args.phase.lower()
     feed_path = Path(args.feed) if args.feed else None
 
-    # Run phases
-    async with async_playwright() as playwright:
-        _, context = await build_browser_context(playwright, config)
+    if phase in ("all", "scrape"):
+        await run_scrape_phase(config, feed_path=feed_path)
 
-        try:
-            if phase in ("all", "scrape"):
-                await run_scrape_phase(config, feed_path=feed_path)
+    if phase in ("all", "score"):
+        run_score_phase(config)
 
-            if phase in ("all", "score"):
-                run_score_phase(config)   # sync — no browser needed
-
-            if phase in ("all", "apply"):
-                await run_apply_phase(
-                    config, context, llm_client,
-                    dry_run=args.dry_run,
-                    specific_job_id=args.job_id,
-                )
-
-        finally:
-            await context.close()
+    if phase in ("all", "apply"):
+        await run_apply_phase(config, llm_client, specific_job_id=args.job_id)
 
     # Summary
     print_run_summary()
@@ -262,11 +342,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         metavar="ID",
         help="Apply to a specific job ID (skips queue query)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Fill forms but never auto-submit (forces manual review)",
     )
     parser.add_argument(
         "--verbose", "-v",

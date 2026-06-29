@@ -38,10 +38,11 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeout,
 )
 
-import anthropic
+import anthropic  # kept for type-compat; actual client is GroqClient
 
 from src.config.config_manager import AppConfig
 from src.matcher.llm_orchestrator import (
+    GroqClient,
     build_llm_client,
     extract_field_mappings,
     generate_cover_letter,
@@ -430,16 +431,15 @@ async def _fill_field(
 
         # Select/dropdown
         if form_field.field_type == "select":
-            # Workday uses div-based custom dropdowns, not native <select>
             if "workday" in selector:
+                # Workday uses div-based custom dropdowns, not native <select>
                 await el.click()
                 await page.wait_for_timeout(500)
                 option_el = page.get_by_role("option", name=re.compile(value, re.IGNORECASE))
                 await option_el.click()
                 logger.debug(f"🔽 Selected Workday option '{value}' in: {selector}")
                 return True
-
-            # Standard <select> — try exact match first, then partial
+            # Standard <select> — exact match first, then partial
             try:
                 await page.select_option(selector, label=value)
             except Exception:
@@ -534,6 +534,191 @@ async def _handle_workday_pagination(page: Page, current_step: int) -> bool:
 
 # Core Form Filler
 
+class PageStateMonitor:
+    """
+    Detects and handles page states that can block form filling:
+    popups, cookie banners, CAPTCHA, login walls, success pages, errors.
+
+    Call dismiss_popups() after navigation and between field fills.
+    Call check_blockers() before starting to fill — it raises if unrecoverable.
+    """
+
+    # Texts on buttons that should be clicked to dismiss overlays
+    DISMISS_BUTTON_TEXTS = [
+        "Accept", "Accept all", "Accept cookies", "Accept & continue",
+        "OK", "Got it", "I agree", "Agree and proceed", "Agree",
+        "Close", "Dismiss", "No thanks", "Not now", "Maybe later",
+        "Allow", "Allow all", "Consent", "I understand", "Continue",
+        "Proceed", "Yes", "Decline", "Reject all",
+        # GDPR-specific
+        "Necessary only", "Only necessary", "Save preferences",
+        "Save settings",
+    ]
+
+    # Selectors that, if visible, indicate a captcha is blocking the page
+    CAPTCHA_SELECTORS = [
+        "iframe[src*='recaptcha']",
+        "iframe[src*='hcaptcha']",
+        "iframe[src*='challenges.cloudflare.com']",
+        ".g-recaptcha",
+        ".h-captcha",
+        "#captcha",
+        "[class*='captcha']",
+        "[id*='captcha']",
+        "[data-sitekey]",
+        "iframe[title*='challenge']",
+    ]
+
+    # Text patterns that mean we've hit a login wall
+    LOGIN_WALL_PATTERNS = [
+        "sign in to apply",
+        "log in to apply",
+        "create an account to apply",
+        "register to apply",
+        "login required",
+        "please sign in",
+        "sign up to apply",
+        "you must be logged in",
+        "apply with linkedin",
+        "apply with indeed",
+    ]
+
+    # Text patterns that mean the application was successfully submitted
+    SUCCESS_PATTERNS = [
+        "application submitted",
+        "thank you for applying",
+        "your application has been received",
+        "successfully applied",
+        "application complete",
+        "we received your application",
+        "application was sent",
+        "you've applied",
+        "you have applied",
+        "application confirmed",
+        "we'll be in touch",
+        "we will be in touch",
+        "application is under review",
+    ]
+
+    # Selectors for generic modal/dialog close buttons
+    MODAL_CLOSE_SELECTORS = [
+        "[aria-label='Close']",
+        "[aria-label='Dismiss']",
+        "[aria-label='close']",
+        ".modal-close",
+        ".popup-close",
+        ".dialog-close",
+        "[class*='modal-close']",
+        "[class*='popup-close']",
+        "[class*='close-button']",
+        "button.close",
+        "[data-dismiss='modal']",
+        "[data-close]",
+    ]
+
+    def __init__(self, page: Page) -> None:
+        self._page = page
+
+    async def dismiss_popups(self) -> int:
+        """
+        Attempt to dismiss any visible overlays/popups.
+        Returns the number of overlays dismissed.
+        """
+        dismissed = 0
+
+        # 1. Handle browser-native dialogs (alert/confirm/prompt)
+        #    These are handled via event listener set up in apply()
+
+        # 2. Try named close buttons
+        for selector in self.MODAL_CLOSE_SELECTORS:
+            try:
+                btn = self._page.locator(selector).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click(timeout=1000)
+                    await self._page.wait_for_timeout(300)
+                    dismissed += 1
+                    logger.debug(f"Popup: dismissed via {selector}")
+            except Exception:
+                pass
+
+        # 3. Try dismiss button texts (cookie banners, GDPR, etc.)
+        for text in self.DISMISS_BUTTON_TEXTS:
+            try:
+                btn = self._page.get_by_role("button", name=re.compile(
+                    rf"^{re.escape(text)}$", re.IGNORECASE
+                ))
+                if await btn.first.is_visible(timeout=300):
+                    await btn.first.click(timeout=1000)
+                    await self._page.wait_for_timeout(300)
+                    dismissed += 1
+                    logger.debug(f"Popup: dismissed via button text '{text}'")
+                    break   # one dismiss per call is usually enough
+            except Exception:
+                pass
+
+        # 4. Escape key — closes most modals
+        if dismissed == 0:
+            try:
+                await self._page.keyboard.press("Escape")
+                await self._page.wait_for_timeout(200)
+            except Exception:
+                pass
+
+        if dismissed:
+            logger.info(f"Popup monitor: dismissed {dismissed} overlay(s)")
+        return dismissed
+
+    async def is_captcha_present(self) -> bool:
+        for sel in self.CAPTCHA_SELECTORS:
+            try:
+                el = self._page.locator(sel).first
+                if await el.is_visible(timeout=300):
+                    logger.warning(f"CAPTCHA detected: {sel}")
+                    return True
+            except Exception:
+                pass
+        return False
+
+    async def is_login_wall(self) -> bool:
+        try:
+            content = (await self._page.content()).lower()
+            return any(p in content for p in self.LOGIN_WALL_PATTERNS)
+        except Exception:
+            return False
+
+    async def is_success_page(self) -> bool:
+        try:
+            content = (await self._page.content()).lower()
+            return any(p in content for p in self.SUCCESS_PATTERNS)
+        except Exception:
+            return False
+
+    async def check_blockers(self) -> None:
+        """
+        Run before starting to fill. Raises RuntimeError with a descriptive
+        message if the page cannot be filled automatically.
+        """
+        # Always try to clear popups first
+        await self.dismiss_popups()
+        await self._page.wait_for_timeout(500)
+
+        if await self.is_captcha_present():
+            raise RuntimeError(
+                "CAPTCHA detected — cannot fill automatically. "
+                "Mark for manual review."
+            )
+
+        if await self.is_login_wall():
+            raise RuntimeError(
+                "Login wall detected — site requires an account to apply."
+            )
+
+        if await self.is_success_page():
+            raise RuntimeError(
+                "Already on success page — application may have been submitted already."
+            )
+
+
 class FormFillerEngine:
     """
     Orchestrates the complete form-fill lifecycle for a single job application.
@@ -543,7 +728,7 @@ class FormFillerEngine:
         result = await engine.apply(job_id=42, apply_url="https://...")
     """
 
-    def __init__(self, config: AppConfig, llm_client: anthropic.Anthropic):
+    def __init__(self, config: AppConfig, llm_client: GroqClient):
         self.config     = config
         self.llm_client = llm_client
         self._resume    = parse_resume(config.resume_pdf_path)
@@ -607,11 +792,21 @@ class FormFillerEngine:
         page = await context.new_page()
         result = FillResult(job_id=job_id, ats_type="unknown", success=False)
 
+        # Auto-dismiss any browser native dialogs (alert/confirm/prompt)
+        page.on("dialog", lambda d: asyncio.ensure_future(d.dismiss()))
+
+        monitor = PageStateMonitor(page)
+
         try:
             # Step 1: Navigate
             logger.info(f"[job_id={job_id}] Navigating to {apply_url}")
             await page.goto(apply_url, wait_until="networkidle",
                             timeout=NAVIGATION_TIMEOUT)
+
+            # Step 1b: Clear any landing-page overlays before we do anything
+            await monitor.dismiss_popups()
+            await page.wait_for_timeout(500)
+
             page_content = await page.content()
 
             # Step 2: Detect ATS
@@ -619,7 +814,10 @@ class FormFillerEngine:
             result.ats_type = ats_type
             logger.info(f"[job_id={job_id}] ATS type: {ats_type}")
 
-            # Step 3: Generate cover letter (async, before field extraction)
+            # Step 2b: Check for hard blockers (CAPTCHA, login wall)
+            await monitor.check_blockers()
+
+            # Step 3: Generate cover letter
             cover_letter = generate_cover_letter(
                 client=self.llm_client,
                 resume_text=self._resume["raw_text"],
@@ -631,7 +829,7 @@ class FormFillerEngine:
             )
             result.cover_letter_text = cover_letter
 
-            # Step 4 + 5: Fill form (handles multi-step internally)
+            # Step 4 + 5: Fill form
             answers: dict[str, str] = {}
 
             if ats_type == "workday":
@@ -641,10 +839,13 @@ class FormFillerEngine:
             else:
                 answers = await self._fill_single_page(
                     page, ats_type, job_id, job_title, company_name,
-                    cover_letter, answers
+                    cover_letter, answers, monitor=monitor
                 )
 
             result.answers_json = json.dumps(answers)
+
+            # Step 5b: Clear any post-fill popups before submitting
+            await monitor.dismiss_popups()
 
             # Step 6: Human-in-the-loop gate
             if self.config.behavior.require_manual_review:
@@ -653,11 +854,18 @@ class FormFillerEngine:
                 result.skipped_review  = not submitted
             else:
                 await self._click_submit(page, ats_type)
+                await page.wait_for_timeout(2000)
+                # Confirm success
+                if await monitor.is_success_page():
+                    logger.info(f"[job_id={job_id}] Success page confirmed")
                 result.submitted = True
 
             result.success = True
             update_job_status(job_id, "applied")
-            logger.info(f"✅ [job_id={job_id}] Application {'submitted' if result.submitted else 'filled (skipped by user)'}")
+            logger.info(
+                f"✅ [job_id={job_id}] Application "
+                f"{'submitted' if result.submitted else 'filled (skipped by user)'}"
+            )
 
         except Exception as exc:
             result.error_message = str(exc)
@@ -683,6 +891,7 @@ class FormFillerEngine:
         company_name: str,
         cover_letter: str,
         answers: dict[str, str],
+        monitor: PageStateMonitor | None = None,
     ) -> dict[str, str]:
         """Fill a single-page application form."""
 
@@ -715,7 +924,25 @@ class FormFillerEngine:
         )
 
         # Fill each field
-        for form_field in fields:
+        for i, form_field in enumerate(fields):
+            # Check for popups every 3 fields
+            if monitor and i % 3 == 0:
+                await monitor.dismiss_popups()
+
+                # If a CAPTCHA appeared mid-fill, stop and flag it
+                if await monitor.is_captcha_present():
+                    logger.warning(
+                        f"[job_id={job_id}] CAPTCHA appeared during fill — stopping"
+                    )
+                    break
+
+                # If somehow we're already on a success page, stop
+                if await monitor.is_success_page():
+                    logger.info(
+                        f"[job_id={job_id}] Success page detected mid-fill — done"
+                    )
+                    break
+
             value = field_mappings.get(form_field.selector) or \
                     field_mappings.get(form_field.label)
 

@@ -9,6 +9,7 @@ config.json
 
 #Temporary Data/Cache
 /logs
+/screenshots
 /data
 /src/config
 /src/scraper/__pycache__

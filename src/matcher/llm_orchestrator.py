@@ -323,3 +323,99 @@ Write the 3-paragraph cover letter body.
 def build_llm_client(api_key: str) -> GroqClient:
     """Create and return a configured GroqClient."""
     return GroqClient(api_key)
+
+
+# Module 6 — Application Pack Generator
+
+COMMON_QUESTIONS = [
+    "Tell me about yourself and your background.",
+    "Why are you interested in this role and company?",
+    "What is your greatest professional achievement?",
+    "Describe a challenging technical problem you solved.",
+    "Why are you looking for a new position?",
+    "What are your salary expectations?",
+    "When can you start?",
+    "Do you have experience working remotely?",
+    "Where do you see yourself in 3 years?",
+    "What is your preferred tech stack and why?",
+]
+
+APP_PACK_SYSTEM_PROMPT = """
+You are a professional job application writer helping a candidate apply for a software role.
+Given the candidate's resume, the job posting, and a list of common application questions,
+produce a complete application pack.
+
+Return a single valid JSON object with this exact schema:
+{
+  "cover_letter": "<3-paragraph letter body, no greeting header, no signature>",
+  "answers": {
+    "<question text>": "<concise, specific answer — 2-4 sentences max>",
+    ...
+  },
+  "elevator_pitch": "<60-second verbal pitch the candidate can use on a call>",
+  "key_talking_points": ["<point 1>", "<point 2>", "<point 3>"]
+}
+
+Rules:
+- Cover letter: para 1 = excitement about role + one specific company detail,
+  para 2 = 2-3 concrete resume achievements relevant to this JD,
+  para 3 = forward-looking close with call to action.
+- Answers: first-person, specific, reference real experience from the resume.
+- Salary answer: give a range based on the role/market; if unknown say "open to discussion".
+- Keep everything honest — only reference skills actually present in the resume.
+- Return ONLY valid JSON. No markdown fences. No commentary.
+"""
+
+
+def generate_application_pack(
+    *,
+    client: GroqClient,
+    resume_text: str,
+    job_title: str,
+    company_name: str,
+    job_description: str,
+    matched_skills: list[str],
+    job_id: int | None = None,
+) -> dict:
+    """
+    Generate a full application pack for one job:
+      - Tailored cover letter
+      - Answers to 10 common application questions
+      - 60-second elevator pitch
+      - Key talking points for interviews
+
+    Returns the parsed JSON dict.
+    """
+    questions_block = "\n".join(f"- {q}" for q in COMMON_QUESTIONS)
+
+    user_message = f"""
+JOB: {job_title} at {company_name}
+
+JOB DESCRIPTION:
+{job_description[:3000]}
+
+TOP MATCHED SKILLS FROM RESUME:
+{", ".join(matched_skills[:8])}
+
+CANDIDATE RESUME:
+{resume_text[:5000]}
+
+COMMON APPLICATION QUESTIONS TO ANSWER:
+{questions_block}
+
+Generate the full application pack JSON.
+""".strip()
+
+    raw = _call_llm(
+        client=client,
+        system_prompt=APP_PACK_SYSTEM_PROMPT,
+        user_message=user_message,
+        purpose="app_pack",
+        job_id=job_id,
+        max_tokens=2048,
+        expect_json=True,
+    )
+
+    pack = json.loads(raw)
+    logger.info(f"[job_id={job_id}] Application pack generated for {job_title} @ {company_name}")
+    return pack

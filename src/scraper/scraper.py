@@ -463,6 +463,12 @@ class MultiSourceScraper:
         ("themuse",        _fetch_themuse),
         ("weworkremotely", _fetch_weworkremotely),
         ("hn_hiring",      _fetch_hn_hiring),
+        ("workingnomads",  _fetch_workingnomads),
+        ("authenticjobs",  _fetch_authentic_jobs),
+        ("jobspresso",     _fetch_jobspresso),
+        ("greenhouse",     _fetch_greenhouse),
+        ("lever",          _fetch_lever),
+        ("ashby",          _fetch_ashby),
     ]
 
     def __init__(self, config: AppConfig) -> None:
@@ -565,7 +571,7 @@ class JSONFeedIngestor:
 async def ingest_and_store(
     scraper: MultiSourceScraper | JSONFeedIngestor,
     config:  AppConfig,
-    max_results: int = 100,
+    max_results: int = 200,
 ) -> list[int]:
     """Run scraper and persist all jobs to SQLite. Returns stored job IDs."""
     new_ids: list[int] = []
@@ -591,3 +597,291 @@ async def ingest_and_store(
 
     logger.info(f"Ingestion complete — {len(new_ids)} jobs stored/updated")
     return new_ids
+
+
+# ── Source 8: Working Nomads ──────────────────────────────────────────────────
+
+async def _fetch_workingnomads(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    results: list[JobListing] = []
+    categories = ["development", "system-admin-devops", "data"]
+    seen: set[str] = set()
+
+    for cat in categories:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(
+                "https://www.workingnomads.com/api/exposed_jobs/",
+                params={"category": cat, "limit": 50},
+            )
+            r.raise_for_status()
+            for job in r.json():
+                uid = str(job.get("id", ""))
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                url = job.get("url", "") or job.get("apply_url", "")
+                if not url:
+                    continue
+                company = (job.get("company") or {}).get("name", "") \
+                          if isinstance(job.get("company"), dict) \
+                          else str(job.get("company", ""))
+                results.append(JobListing(
+                    title       = job.get("title", ""),
+                    company     = company,
+                    location    = job.get("location", "Remote"),
+                    description = job.get("description", ""),
+                    apply_url   = url,
+                    source      = "workingnomads",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.warning(f"WorkingNomads/{cat} error: {e}")
+
+    logger.info(f"WorkingNomads: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 9: Authentic Jobs (RSS) ────────────────────────────────────────────
+
+async def _fetch_authentic_jobs(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    results: list[JobListing] = []
+    seen: set[str] = set()
+    try:
+        r = await client.get(
+            "https://authenticjobs.com/feed/",
+            params={"type": "1", "location": "remote"},
+        )
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        for item in root.findall(".//item"):
+            link  = (item.findtext("link") or "").strip()
+            title = (item.findtext("title") or "").strip()
+            desc  = (item.findtext("description") or "").strip()
+            creator = (item.findtext("{http://purl.org/dc/elements/1.1/}creator") or "").strip()
+            if not link or link in seen:
+                continue
+            seen.add(link)
+            results.append(JobListing(
+                title       = title,
+                company     = creator,
+                location    = "Remote",
+                description = desc,
+                apply_url   = link,
+                source      = "authenticjobs",
+            ))
+    except Exception as e:
+        logger.warning(f"AuthenticJobs error: {e}")
+
+    logger.info(f"AuthenticJobs: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 10: Jobspresso (RSS) ───────────────────────────────────────────────
+
+async def _fetch_jobspresso(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    results: list[JobListing] = []
+    seen: set[str] = set()
+    try:
+        r = await client.get("https://jobspresso.co/feed/")
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        for item in root.findall(".//item"):
+            link  = (item.findtext("link") or "").strip()
+            title = (item.findtext("title") or "").strip()
+            desc  = (item.findtext("description") or "").strip()
+            creator = (item.findtext("{http://purl.org/dc/elements/1.1/}creator") or "").strip()
+            if not link or link in seen:
+                continue
+            seen.add(link)
+            results.append(JobListing(
+                title       = title,
+                company     = creator,
+                location    = "Remote",
+                description = desc,
+                apply_url   = link,
+                source      = "jobspresso",
+            ))
+    except Exception as e:
+        logger.warning(f"Jobspresso error: {e}")
+
+    logger.info(f"Jobspresso: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 11: Greenhouse (public company boards) ─────────────────────────────
+# No auth needed for GET endpoints per Greenhouse docs.
+# Token = company's board slug (usually their domain name without TLD).
+
+GREENHOUSE_COMPANIES = [
+    # Remote-first / well-known for remote hiring
+    "gitlab", "hashicorp", "automattic", "zapier", "invision",
+    "hubspot", "datadog", "elastic", "mongodb", "confluent",
+    "cloudflare", "twilio", "segment", "postman", "grafana",
+    "sourcegraph", "1password", "temporal", "deno", "fly",
+    # Startups & scale-ups
+    "notion", "linear", "retool", "airtable", "loom",
+    "figma", "miro", "coda", "pitch", "rows",
+    "vercel", "netlify", "supabase", "appwrite", "novu",
+    "resend", "trigger", "inngest", "upstash", "turso",
+    # Fintech & SaaS
+    "gusto", "rippling", "brex", "mercury", "ramp",
+    "plaid", "stripe", "adyen", "checkout", "paddle",
+]
+
+
+async def _fetch_greenhouse(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    results: list[JobListing] = []
+    seen: set[str] = set()
+
+    for company in GREENHOUSE_COMPANIES:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(
+                f"https://api.greenhouse.io/v1/boards/{company}/jobs",
+                params={"content": "true"},
+            )
+            if r.status_code == 404:
+                continue   # company not on Greenhouse or wrong slug
+            r.raise_for_status()
+            for job in r.json().get("jobs", []):
+                uid = str(job.get("id", ""))
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                url = job.get("absolute_url", "")
+                if not url:
+                    continue
+                results.append(JobListing(
+                    title       = job.get("title", ""),
+                    company     = company.title(),
+                    location    = (job.get("location") or {}).get("name", "Remote"),
+                    description = job.get("content", ""),
+                    apply_url   = url,
+                    source      = "greenhouse",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.debug(f"Greenhouse/{company}: {e}")
+
+    logger.info(f"Greenhouse: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 12: Lever (public company boards) ──────────────────────────────────
+
+LEVER_COMPANIES = [
+    # Remote-friendly companies known to use Lever
+    "buffer", "doist", "remote", "deel", "hotjar",
+    "intercom", "mixpanel", "amplitude", "heap", "fullstory",
+    "netlify", "render", "railway", "warp", "zed",
+    "scale-ai", "cohere", "perplexity", "together-ai", "replicate",
+    "huggingface", "modal", "anyscale", "ray", "prefect",
+    "dagster", "airbyte", "fivetran", "dbt-labs", "hightouch",
+    "census", "rudderstack", "segment", "mparticle", "snowplow",
+]
+
+
+async def _fetch_lever(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    results: list[JobListing] = []
+    seen: set[str] = set()
+
+    for company in LEVER_COMPANIES:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(
+                f"https://api.lever.co/v0/postings/{company}",
+                params={"mode": "json"},
+            )
+            if r.status_code in (404, 401):
+                continue
+            r.raise_for_status()
+            for job in r.json():
+                uid = str(job.get("id", ""))
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                url = job.get("hostedUrl", "") or job.get("applyUrl", "")
+                if not url:
+                    continue
+                cats = job.get("categories", {}) or {}
+                results.append(JobListing(
+                    title       = job.get("text", ""),
+                    company     = company.replace("-", " ").title(),
+                    location    = cats.get("location", "Remote"),
+                    description = (job.get("descriptionBody") or
+                                   job.get("description", "")),
+                    apply_url   = url,
+                    source      = "lever",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.debug(f"Lever/{company}: {e}")
+
+    logger.info(f"Lever: {len(results)} jobs fetched")
+    return results
+
+
+# ── Source 13: Ashby (public company boards) ──────────────────────────────────
+
+ASHBY_COMPANIES = [
+    # Startups that have adopted Ashby as their ATS
+    "anthropic", "mistral", "perplexity", "cursor", "replit",
+    "fly", "neon", "turso", "convex", "liveblocks",
+    "electric-sql", "powersync", "triplit", "evolu", "livestore",
+    "val-town", "e2b", "modal", "baseten", "lepton",
+    "braintrust", "langchain", "llamaindex", "qdrant", "weaviate",
+    "chroma", "pinecone", "milvus", "zilliz", "vespa",
+]
+
+
+async def _fetch_ashby(
+    client: httpx.AsyncClient, max_results: int
+) -> list[JobListing]:
+    results: list[JobListing] = []
+    seen: set[str] = set()
+
+    for company in ASHBY_COMPANIES:
+        if len(results) >= max_results:
+            break
+        try:
+            r = await client.get(
+                f"https://api.ashbyhq.com/posting-api/job-board/{company}",
+            )
+            if r.status_code in (404, 400):
+                continue
+            r.raise_for_status()
+            for job in r.json().get("jobPostings", []):
+                uid = str(job.get("id", ""))
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                url = job.get("jobUrl", "") or job.get("applyUrl", "")
+                if not url:
+                    continue
+                results.append(JobListing(
+                    title       = job.get("title", ""),
+                    company     = company.replace("-", " ").title(),
+                    location    = job.get("locationName", "Remote"),
+                    description = job.get("descriptionHtml", ""),
+                    apply_url   = url,
+                    source      = "ashby",
+                ))
+            await asyncio.sleep(POLITE_DELAY)
+        except Exception as e:
+            logger.debug(f"Ashby/{company}: {e}")
+
+    logger.info(f"Ashby: {len(results)} jobs fetched")
+    return results

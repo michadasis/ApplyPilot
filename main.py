@@ -98,8 +98,7 @@ async def run_apply_phase(
     import json as _json
     import textwrap
     from pathlib import Path as _Path
-    from src.matcher.llm_orchestrator import generate_application_pack
-    from src.matcher.resume_matcher import ResumeMatcher
+    from src.matcher.llm_orchestrator import generate_application_pack, parse_resume
 
     logger.info("═" * 50)
     logger.info("PHASE 3: APPLYING")
@@ -123,9 +122,9 @@ async def run_apply_phase(
         logger.info("No jobs queued. Run scrape + score phases first.")
         return
 
-    # Load resume once
-    matcher = ResumeMatcher(config)
-    resume_text = matcher.resume_text
+    # Load resume text
+    from src.matcher.llm_orchestrator import parse_resume
+    resume_text = parse_resume(config.resume_pdf_path)["raw_text"]
 
     packs_dir = _Path("data/packs")
     packs_dir.mkdir(parents=True, exist_ok=True)

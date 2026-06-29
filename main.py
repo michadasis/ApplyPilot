@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # Phase runners
 
 async def run_scrape_phase(config, feed_path: Path | None = None) -> None:
-    """Phase 1: Discover and store new job listings via RemoteOK API or JSON feed."""
+    """Phase 1: Discover and store new job listings from all sources."""
     logger.info("═" * 50)
     logger.info("PHASE 1: SCRAPING")
     logger.info("═" * 50)
@@ -63,10 +63,24 @@ async def run_scrape_phase(config, feed_path: Path | None = None) -> None:
     else:
         scraper = MultiSourceScraper(config)
 
+    # Re-queue jobs that were skipped more than 7 days ago so they get
+    # re-evaluated on the next score run (new resume version, changed market).
+    from src.tracker.schema import get_db
+    with get_db() as conn:
+        requeued = conn.execute("""
+            UPDATE jobs SET status = 'pending'
+            WHERE status = 'skipped'
+              AND created_at < datetime('now', '-7 days')
+        """).rowcount
+    if requeued:
+        logger.info(f"Re-queued {requeued} stale skipped job(s) for re-scoring")
+
+    # Scrape as many as possible — the score phase does the filtering.
+    # Don't use max_applications_per_run here; that limit only applies to apply.
     await ingest_and_store(
         scraper,
         config,
-        max_results=config.behavior.max_applications_per_run * 3,  # buffer
+        max_results=500,
     )
 
 

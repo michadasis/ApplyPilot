@@ -455,22 +455,6 @@ class MultiSourceScraper:
         "Accept":     "application/json, text/xml, */*",
     }
 
-    FETCHERS = [
-        ("remotive",       _fetch_remotive),
-        ("arbeitnow",      _fetch_arbeitnow),
-        ("jobicy",         _fetch_jobicy),
-        ("himalayas",      _fetch_himalayas),
-        ("themuse",        _fetch_themuse),
-        ("weworkremotely", _fetch_weworkremotely),
-        ("hn_hiring",      _fetch_hn_hiring),
-        ("workingnomads",  _fetch_workingnomads),
-        ("authenticjobs",  _fetch_authentic_jobs),
-        ("jobspresso",     _fetch_jobspresso),
-        ("greenhouse",     _fetch_greenhouse),
-        ("lever",          _fetch_lever),
-        ("ashby",          _fetch_ashby),
-    ]
-
     def __init__(self, config: AppConfig) -> None:
         self.config = config
 
@@ -885,3 +869,22 @@ async def _fetch_ashby(
 
     logger.info(f"Ashby: {len(results)} jobs fetched")
     return results
+
+
+# FETCHERS is assigned here (after all functions are defined) to avoid
+# NameErrors from forward references during class-body evaluation.
+MultiSourceScraper.FETCHERS = [
+    ("remotive",       _fetch_remotive),
+    ("arbeitnow",      _fetch_arbeitnow),
+    ("jobicy",         _fetch_jobicy),
+    ("himalayas",      _fetch_himalayas),
+    ("themuse",        _fetch_themuse),
+    ("weworkremotely", _fetch_weworkremotely),
+    ("hn_hiring",      _fetch_hn_hiring),
+    ("workingnomads",  _fetch_workingnomads),
+    ("authenticjobs",  _fetch_authentic_jobs),
+    ("jobspresso",     _fetch_jobspresso),
+    ("greenhouse",     _fetch_greenhouse),
+    ("lever",          _fetch_lever),
+    ("ashby",          _fetch_ashby),
+]

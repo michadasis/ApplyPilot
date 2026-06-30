@@ -19,11 +19,26 @@ from src.tracker.schema import log_llm_call
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL   = "llama-3.3-70b-versatile"
-MAX_TOKENS      = 2048
-# Groq free tier: 30 req/min. One call per 2.5s keeps us safely under.
+DEFAULT_MODEL    = "llama-3.3-70b-versatile"  # generation: cover letters, Q&A
+SCORE_MODEL      = "llama-3.1-8b-instant"     # scoring: 500k TPD vs 100k for 70B
+MAX_TOKENS       = 2048
 INTER_CALL_DELAY = 2.5
 RESUME_CACHE: dict[str, Any] = {}
+
+# Token budgets for scoring — kept small to stretch the daily limit
+SCORE_RESUME_CHARS = 2000   # ~500 tokens
+SCORE_JD_CHARS     = 1500   # ~375 tokens
+
+
+def _parse_retry_delay(error_str: str) -> float:
+    """Extract suggested retry-after seconds from a Groq 429 message."""
+    m = re.search(r"retry in (\d+)m([\d.]+)s", error_str)
+    if m:
+        return int(m.group(1)) * 60 + float(m.group(2))
+    m = re.search(r"retry in ([\d.]+)s", error_str)
+    if m:
+        return float(m.group(1))
+    return 65.0
 
 
 # Client wrapper
@@ -73,12 +88,20 @@ def _call_llm(
 
         except Exception as e:
             status = getattr(e, "status_code", None)
-            if status == 429 and attempt < max_attempts - 1:
-                # Try to read the suggested wait from the error body
-                match = re.search(r"try again in (\d+(?:\.\d+)?)s", str(e), re.IGNORECASE)
-                wait = float(match.group(1)) if match else 60.0
-                logger.warning(f"[{purpose}] Rate limited — waiting {wait:.0f}s (attempt {attempt + 1})")
-                time.sleep(wait)
+            if status == 429:
+                delay = _parse_retry_delay(str(e))
+                if delay > 600:   # > 10 min = daily quota gone for today
+                    raise RuntimeError(
+                        f"Daily token quota exhausted (suggested wait: {delay/60:.0f} min). "
+                        "Run --phase score again tomorrow, or the quota resets at midnight UTC."
+                    ) from e
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        f"[{purpose}] Rate limited — waiting {delay:.0f}s (attempt {attempt + 1})"
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
             else:
                 raise
 
@@ -182,21 +205,23 @@ def score_job_match(
     job_description: str,
     job_id: int | None = None,
 ) -> dict[str, Any]:
+    # Short excerpts + fast model to stay within the 500k TPD free-tier limit
     user_message = f"""
 CANDIDATE RESUME:
-{resume_text[:6000]}
+{resume_text[:SCORE_RESUME_CHARS]}
 
 JOB TITLE: {job_title}
 
 JOB DESCRIPTION:
-{job_description[:4000]}
+{job_description[:SCORE_JD_CHARS]}
 
 Evaluate the match and return the JSON object.
 """.strip()
 
     raw    = _call_llm(client=client, system_prompt=MATCH_SYSTEM_PROMPT,
                        user_message=user_message, purpose="match",
-                       job_id=job_id, expect_json=True)
+                       job_id=job_id, model=SCORE_MODEL,
+                       max_tokens=512, expect_json=True)
     result: dict[str, Any] = json.loads(raw)
     logger.info(f"[job_id={job_id}] Match score: {result.get('match_score', 0):.2f} "
                 f"({result.get('recommended_action')})")

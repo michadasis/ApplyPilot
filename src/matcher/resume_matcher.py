@@ -104,6 +104,18 @@ class ResumeMatcher:
                 # We store matched_skills for cover letter generation later
                 _store_match_metadata(job_id, result)
 
+            except RuntimeError as e:
+                if "Daily token quota exhausted" in str(e):
+                    logger.error(f"🛑 {e}")
+                    logger.info(
+                        f"Stopped after {summary['queued']} queued, "
+                        f"{summary['skipped']} skipped, {summary['errors']} errors. "
+                        "Remaining jobs stay 'pending' — re-run tomorrow."
+                    )
+                    break
+                logger.error(f"[job_id={job_id}] Scoring error: {e}", exc_info=True)
+                summary["errors"] += 1
+
             except Exception as e:
                 logger.error(f"[job_id={job_id}] Scoring error: {e}", exc_info=True)
                 summary["errors"] += 1

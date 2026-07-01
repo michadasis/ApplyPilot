@@ -134,7 +134,9 @@ def _call_llm(
                     {"role": "assistant", "content": text},
                     {"role": "user",      "content":
                         "Your response was not valid JSON. "
-                        "Return ONLY the JSON object, no markdown fences, no commentary."},
+                        "Return ONLY a raw JSON object. "
+                        "No markdown, no backticks, no explanation. "
+                        "Start with { and end with }."},
                 ],
             )
             text = _strip_json_fences(retry.choices[0].message.content.strip())
@@ -189,11 +191,14 @@ Schema:
   "recommended_action": "apply" | "skip" | "review"
 }
 
+CRITICAL: recommended_action MUST be exactly one of these three strings: "apply", "skip", "review".
+Do NOT write "apply with tailored cover letter" or any other variant. Just "apply".
+
 Scoring:
-- 0.85+  Strong match — apply confidently
-- 0.65-0.84  Decent match — apply with tailored cover letter
-- 0.50-0.64  Weak match — skip unless desperate
-- <0.50  Poor match — always skip
+- 0.85+  Strong match — recommended_action: "apply"
+- 0.65-0.84  Decent match — recommended_action: "apply"
+- 0.50-0.64  Borderline — recommended_action: "review"
+- <0.50  Poor match — recommended_action: "skip"
 """
 
 

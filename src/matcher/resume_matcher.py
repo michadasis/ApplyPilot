@@ -83,9 +83,12 @@ class ResumeMatcher:
 
                 score  = float(result.get("match_score", 0.0))
                 action = result.get("recommended_action", "review")
+                # Normalise — LLM sometimes returns variants like
+                # "apply with tailored cover letter", "Apply", "apply_with_...", etc.
+                is_apply = action.lower().replace("_", " ").strip().startswith("apply")
 
                 # Store match score + transition status
-                if score >= self.config.search.min_match_score and action == "apply":
+                if score >= self.config.search.min_match_score and is_apply:
                     update_job_status(job_id, "queued", match_score=score)
                     summary["queued"] += 1
                     logger.info(

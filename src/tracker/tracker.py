@@ -302,7 +302,7 @@ def print_run_summary() -> None:
         """).fetchall()
 
     print("\n" + "═" * 64)
-    print("  AUTO-APPLY BOT │ RUN SUMMARY")
+    print("  APPLYPILOT │ RUN SUMMARY")
     print("═" * 64)
     print(f"  Total jobs in DB : {stats['total']}")
     print(f"  Applied          : {stats['applied']}")

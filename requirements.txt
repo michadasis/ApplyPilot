@@ -1,9 +1,5 @@
-# Auto-Apply Job Bot — Python dependencies
-# Install with: pip install -r requirements.txt
-# Then run: playwright install chromium
-
 # Core automation
-playwright==1.44.0              # Browser automation (Chromium)
+#playwright==1.44.0              # Browser automation (Chromium)
 
 # AI / LLM
 groq>=0.9.0                    # Groq API client (free tier, EU-friendly)
